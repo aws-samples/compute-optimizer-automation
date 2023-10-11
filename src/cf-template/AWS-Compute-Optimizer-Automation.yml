@@ -541,9 +541,22 @@ Resources:
               if response['Reservations'][0]['Instances'][0]['Placement']['GroupName'] != '':
                   return_message["message"] = "The instance is part of a Placement Group"
                   return return_message
+              
+              # # Validate that the instance has CloudWatch Agent installed
+              # cw_agent_installed = False
+              # for utilization_metric in event['UtilizationMetrics']:
+              #     if utilization_metric['Name'] == 'MEMORY':
+              #         cw_agent_installed = True
+              
+              # if not cw_agent_installed:
+              #     return_message["message"] = 'The instance does not have CloudWatch Agent installed'
+              #     return return_message
                       
               for recommendation in event['RecommendationOptions']:
                   if recommendation['PerformanceRisk'] <= risk_profile and 'SavingsOpportunity' in recommendation:
+                      if recommendation['InstanceType'] == event['CurrentInstanceType']:
+                          continue
+                      
                       if 'Architecture' in recommendation['PlatformDifferences'] and architectural_change != 'yes':
                           continue
 
@@ -555,8 +568,8 @@ Resources:
                               "change_option_detected": True,
                               "email_approval": email_approval,
                               "maintenance_window": maintance_window_utc_timestamp,
-                              "ec2_id": ec2_id,
                               "InstanceArn": event['InstanceArn'],
+                              "ec2_id": ec2_id,
                               "ec2_name": event['InstanceName'],
                               "ec2_new_instance_type": recommendation['InstanceType'],
                               "ec2_current_instance_type": event['CurrentInstanceType'],
@@ -615,7 +628,6 @@ Resources:
           import boto3
 
           def lambda_handler(event, context):
-
               ec2_id = event['ec2_id']
               ec2_new_instance_type = event['ec2_new_instance_type']
               ec2_current_instance_type = event['ec2_current_instance_type']
@@ -654,16 +666,12 @@ Resources:
               elif ec2_instance.state['Name'] == 'stopped':
                   try: 
                       ec2_instance.modify_attribute(InstanceType={'Value':ec2_new_instance_type})
-                      ec2_instance.start()
-                      ec2_instance.wait_until_running()
                       update_successfully = True
                       message = "The EC2 instance %s was successfully updated to %s" % (ec2_id, ec2_new_instance_type)
                   except Exception as e:
                       print('Error during the update: ' + str(e))
                       print('Rolling back to previous configuration')
                       ec2_instance.modify_attribute(InstanceType={'Value':ec2_current_instance_type})
-                      ec2_instance.start()
-                      ec2_instance.wait_until_running()
                       
               else:
                   print("Something is wrong with the state of the instance")
@@ -672,7 +680,7 @@ Resources:
                   "update_successfully": update_successfully,
                   "ec2_id": ec2_id,
                   "message": message,
-                  "InstanceArn": event['InstanceArn'],
+                  "InstanceArn": event['InstanceArn']
               }
 
   LambdaUpdateInstanceRole:
@@ -709,18 +717,18 @@ Resources:
                   - 'ec2:CreateSnapshot'
                 Resource: '*' 
 
-  # Begin Lambda that send update email
+  # Begin Lambda that makes the rollback and send the email
 
   LambdaSendRollbackEmailFunction:
     Type: AWS::Lambda::Function
     Properties:
-      Description: 'AWS COA - Lambda Function that send an email to the customer after the instance was updated'
-      FunctionName: !Sub ${AWS::StackName}-COA-send-rollback-email
+      Description: 'AWS COA - Lambda Function that rollback the instance and send an email to the customer'
+      FunctionName: !Sub ${AWS::StackName}-COA-instance-rollback-and-email
       Handler: index.lambda_handler
       Runtime: python3.10
       Role: !GetAtt 'LambdaSendRollbackEmailRole.Arn'
       MemorySize: 128
-      Timeout: 60
+      Timeout: 900
       ReservedConcurrentExecutions: !Ref ConcurrencyLimit
       Environment:
         Variables:
@@ -731,9 +739,24 @@ Resources:
           import os
 
           def lambda_handler(event, context):
+              
+              ec2_id = event['ec2_id']
 
-              ec2_id = event['inputPayload']['ec2_id']
-              ec2_name = event['inputPayload']['ec2_name']
+              if 'update_successfully' not in event:
+                  ec2 = boto3.resource('ec2')
+                  ec2_instance = ec2.Instance(ec2_id)
+
+                  ec2_current_instance_type = event['ec2_current_instance_type']
+
+                  if ec2_instance.instance_type != ec2_current_instance_type:
+                      if ec2_instance.state['Name'] == 'running':
+                          ec2_instance.stop()
+                          ec2_instance.wait_until_stopped()
+                          ec2_instance.modify_attribute(InstanceType={'Value':ec2_current_instance_type})
+                          ec2_instance.start()
+                          ec2_instance.wait_until_running()
+                      if ec2_instance.state['Name'] == 'stopped':
+                          ec2_instance.modify_attribute(InstanceType={'Value':ec2_current_instance_type})
 
               emailSnsTopic = os.environ.get('SNSTopic')
               
@@ -742,13 +765,13 @@ Resources:
 
               We want to notify you that during the instance upgrade process, we found an error and reverted all the changes for the following instance:
 
-              \t\t * Instance : "%s (%s)"
+              \t\t * Instance : "%s"
 
               Please note that the instance is already up and running, and if the resource continues to be flagged by AWS Compute Optimizer, we will try again during the next maintenance window.
               
               Thank you!
 
-              """ % (ec2_name, ec2_id) 
+              """ % (ec2_id) 
 
               sns = boto3.client('sns')
               params = {
@@ -760,7 +783,6 @@ Resources:
               try:
                   response = sns.publish(**params)
                   print('MessageId: ' + response['MessageId'])
-                  return None
 
               except Exception as e:
                   print('Error publishing to SNS topic: ' + str(e))
@@ -769,7 +791,7 @@ Resources:
               return {
                   "ec2_id": ec2_id,
                   "message": 'The change was successfully rollback due to an issue',
-                  "InstanceArn": event['InstanceArn']
+                  "EC2_instance": event['InstanceArn']
               }
 
   LambdaSendRollbackEmailRole:
@@ -798,7 +820,14 @@ Resources:
               - Effect: Allow
                 Action:
                   - 'sns:Publish'
-                Resource: !Ref SNSTopic 
+                Resource: !Ref SNSTopic
+              - Effect: Allow
+                Action:
+                  - 'ec2:DescribeInstances'
+                  - 'ec2:StartInstances'
+                  - 'ec2:ModifyInstanceAttribute'
+                  - 'ec2:StopInstances'
+                Resource: '*'
 
   # Begin Step Function
 
@@ -958,7 +987,17 @@ Resources:
                           "BackoffRate": 2
                         }
                       ],
-                      "Next": "Validate the Change"
+                      "Next": "Validate the Change",
+                      "Catch": [
+                        {
+                          "ErrorEquals": [
+                            "States.ALL"
+                          ],
+                          "Comment": "rollback",
+                          "Next": "Rollback and email",
+                          "ResultPath": null
+                        }
+                      ]
                     },
                     "Validate the Change": {
                       "Type": "Choice",
@@ -966,12 +1005,12 @@ Resources:
                         {
                           "Variable": "$.update_successfully",
                           "BooleanEquals": false,
-                          "Next": "Update about rollback email"
+                          "Next": "Rollback and email"
                         }
                       ],
                       "Default": "Instance Updated"
                     },
-                    "Update about rollback email": {
+                    "Rollback and email": {
                       "Type": "Task",
                       "Resource": "arn:aws:states:::lambda:invoke",
                       "OutputPath": "$.Payload",

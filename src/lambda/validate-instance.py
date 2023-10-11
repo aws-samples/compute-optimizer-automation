@@ -80,6 +80,9 @@ def lambda_handler(event, context):
             
     for recommendation in event['RecommendationOptions']:
         if recommendation['PerformanceRisk'] <= risk_profile and 'SavingsOpportunity' in recommendation:
+            if recommendation['InstanceType'] == event['CurrentInstanceType']:
+                continue
+            
             if 'Architecture' in recommendation['PlatformDifferences'] and architectural_change != 'yes':
                 continue
 
