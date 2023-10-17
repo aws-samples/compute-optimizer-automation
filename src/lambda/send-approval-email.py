@@ -16,7 +16,7 @@ def lambda_handler(event, context):
     migration_effort = event['inputPayload']['migration_effort']
     performance_risk = event['inputPayload']['performance_risk']
     risk_profile = ['No Risk', 'Very Low', 'Low', 'Medium', 'High', 'Very High']
-    risk = risk_profile[performance_risk]
+    risk = risk_profile[int(performance_risk)]
     savings_opportunity = event['inputPayload']['savings_opportunity']
     savings_opportunity_percentage = event['inputPayload']['savings_opportunity_percentage']
     
