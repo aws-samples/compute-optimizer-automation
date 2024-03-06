@@ -20,7 +20,7 @@ The AWS COA architecture is built around an AWS Step Function, which efficiently
 
 2. **Parallel Processing:** Each resource recommendation is processed in parallel by AWS COA to determine if it corresponds to an overprovisioned resource and whether it aligns with your defined risk profile.
 
-3. **Optional User Approval:** If enabled, AWS COA sends an approval request via SNS and API Gateway before making any changes. This ensures you have the final say in resource modifications.
+3. **Optional User Approval:** If enabled, AWS COA sends an approval request via EventBridge, SNS and API Gateway before making any changes. This ensures you have the final say in resource modifications.
 
 4. **Maintenance Window:** The solution waits until the next maintenance window before applying any changes to your resources. This allows for controlled and scheduled updates, minimizing disruption.
 
@@ -38,29 +38,41 @@ Follow these steps to get started with AWS COA:
 
 3. **Define Parameters:** During the CloudFormation deployment, you'll need to specify various parameters that align with your organization's preferences for automatic resource changes. These parameters include:
 
+    - **AutomateEC2Recommendations:** define whether to automate EC2 recommendations from AWS Compute Optimizer
+
     - **ArchitecturalChange:** define whether you want to consider changes to the processor.
 
-    - **Email:** email address to receive notifications from AWS COA.
+    - **EBSSnapshot:** define whether to take a snapshot before upgrading the EC2 instance
 
-    - **EmailApproval:** specify if you want to send email approval requests before making any changes.
+    - **AutomateEBSRecommendations:** define whether to automate EBS recommendations from AWS Compute Optimizer
+
+    - **DefaultApprovalFlow:** this will launch a sample flow that uses SNS and API Gateway for the approval
+
+    - **Email:** email address to receive notifications from AWS COA as part of the default approval flow.
+
+    - **ApprovalRequired:** define whether you want to send an approval request before making any changes.
 
     - **ExcludeTag:** define the tag that identifies the resources you want to exclude from optimization.
 
     - **MaintenanceWindowDay:** define the day you want to make changes to the resources during the maintenance window.
 
-    - **MaintenanceWindowTime:** Define the time (in UTC) you want to make changes to the resources during the maintenance window.
+    - **MaintenanceWindowTime:** define the time (in UTC) you want to make changes to the resources during the maintenance window.
 
-    - **RiskProfile:** Define the level of risk you are willing to take for automated resource changes.
+    - **RiskProfile:** define the level of risk you are willing to take for automated resource changes.
 
 4. **Resource Optimization:** AWS COA will automatically evaluate the recommendations every other week and apply the relevant recommendations during the designated maintenance window. This ensures that your resources are consistently optimized without manual intervention.
 
-5. **Optional User Approval (If Enabled):** If user approval is enabled during the CloudFormation setup, users will receive notifications via SNS and API Gateway to approve or reject resource changes before they are implemented. This additional layer of control ensures that you have the final say in resource modifications.
+5. **Optional User Approval (If Enabled):** If user approval is enabled during the CloudFormation setup, an EventBridge event will be created to approve or reject resource changes before they are implemented. This additional layer of control ensures that you have the final say in resource modifications.
+
+    * If you are using the 'DefaultApprovalFlow', an EventBridge rule will be configured to capture the event. Subsequently, using SNS and API Gateway, a notification will be sent to request the approval or rejection of the change.
+
+    * The EventBridge event can also be utilized for integrating with other approval flows.
 
 # Limitations
 
 While AWS COA is a powerful solution for optimizing EC2 instances and reducing costs, it has certain limitations to consider:
 
-1. **Limited to EC2 Instances:** Currently, AWS COA only applies recommendations on EC2 instances. We have plans to expand support for other AWS services in future updates.
+1. **Limited to EC2 Instances and EBS Volumes:** Currently, AWS COA only applies recommendations on EC2 instances and EBS Volumes. We have plans to expand support for other AWS services in future updates.
 
 2. **Recommendation Accuracy with CloudWatch Agent:** To ensure accurate recommendations, it is highly recommended to have the CloudWatch agent installed on all your instances. This allows AWS Compute Optimizer to consider memory usage alongside other metrics when generating recommendations.
 

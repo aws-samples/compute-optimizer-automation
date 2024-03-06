@@ -1,11 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: AWS COA - Streamline your workflow with the automatic application of Compute Optimizer EC2 recommendations. The validations occur every other Monday at 8:00 am, but changes are implemented within the maintenance window specified in the parameters
+Description: AWS COA - Streamline your workflow with the automatic application of AWS Compute Optimizer recommendations. The validations occur every other Monday at 8:00 am, but changes are implemented within the maintenance window specified in the parameters
 Parameters:
-  Email:
-    Type: String
-    AllowedPattern: '[^@]+@[^@]+\.[^@]+'
-    Description: 'Email address to be associated with the SNS topic'
-    ConstraintDescription: 'Please ensure that the provided email address is valid and correctly formatted'
   RiskProfile:
     Type: String
     Default: Medium
@@ -16,21 +11,46 @@ Parameters:
     Default: 'no'
     AllowedValues: ['yes', 'no']
     Description: 'Should we consider changes to the processor? For example: x86 to ARM'
-  EmailApproval:
+  EBSSnapshot:
     Type: String
     Default: 'no'
     AllowedValues: ['yes', 'no']
-    Description: 'Would you like to send an email to request approval before proceeding with the change?'
+    Description: 'Do you want to take EBS Snapshot before updating the EC2 instance?'
+  ApprovalRequired:
+    Type: String
+    Default: 'yes'
+    AllowedValues: ['yes', 'no']
+    Description: 'Would you like to send an approval request before proceeding with the change?'
+  AutomateEC2Recommendations:
+    Type: String
+    Default: 'yes'
+    AllowedValues: ['yes', 'no']
+    Description: 'Would you like to automatically apply the EC2 recommendations from AWS Compute Optimizer?'
+  AutomateEBSRecommendations:
+    Type: String
+    Default: 'yes'
+    AllowedValues: ['yes', 'no']
+    Description: 'Would you like to automatically apply the EBS recommendations from AWS Compute Optimizer?'
+  DefaultApprovalFlow:
+    Type: String
+    Default: 'yes'
+    AllowedValues: ['yes', 'no']
+    Description: 'Would you like to deploy the default approval flow that uses SNS, APIGW and Lambda?'
+  Email:
+    Type: String
+    AllowedPattern: '[^@]+@[^@]+\.[^@]+'
+    Description: 'Email address to be associated with the SNS topic for the default approval flow'
+    ConstraintDescription: 'Please ensure that the provided email address is valid and correctly formatted'
   MaintenanceWindowDay:
     Type: String
     Default: Sunday
     AllowedValues: [Monday, Tuesday, Wednesday, Thursday, Friday, Saturday, Sunday]
-    Description: 'Preferred day to make the changes to the EC2 instances'
+    Description: 'Preferred day to make the changes to the resources'
   MaintenanceWindowTime:
     Type: String
     Default: '08:01'
     AllowedPattern: "^[0-2]?[0-9]:[0-5][0-9]$"
-    Description: 'Preferred time to make the changes to the EC2 instances. The value needs to be in UTC time and format ##:## (24 hours)'
+    Description: 'Preferred time to make the changes to the resources. The value needs to be in UTC time and format ##:## (24 hours)'
   ExcludeTag:
     Type: String
     Default: 'Exclude-compute-optimizer-automation'
@@ -40,10 +60,21 @@ Parameters:
     Default: 40
     Description: 'Enter the concurrency limit for the Lambda functions (default is 40). For large environments, it is recommended to define a larger number'
 
+Conditions:
+  ShouldDeployDefaultApprovalFlowResources:
+    !Equals [!Ref DefaultApprovalFlow, "yes"]
+
 Resources:
-  # Begin API GW and Lambda that gets approval/rejection from the customer
+  EventBridgeBus:
+    Type: AWS::Events::EventBus
+    Properties:
+      Name: !Sub ${AWS::StackName}-COA-EventBridge-bus
+
+  # START - Default Default Approval Flow
+  # API GW and Lambda that gets approval/rejection from the customer
   ApiGateway:
     Type: AWS::ApiGateway::RestApi
+    Condition: ShouldDeployDefaultApprovalFlowResources
     Properties:
       Name: !Sub ${AWS::StackName}-COA-Endpoint
       Description: 'AWS COA - endpoint to the get the approval before applying the compute optimizer recommendation'
@@ -53,6 +84,7 @@ Resources:
   
   Authorizer:
     Type: AWS::ApiGateway::Authorizer
+    Condition: ShouldDeployDefaultApprovalFlowResources
     Properties:
       Name: !Sub ${AWS::StackName}-COA-Authorizer
       Type: REQUEST
@@ -63,11 +95,12 @@ Resources:
   
   AuthorizerLambda:
     Type: AWS::Lambda::Function
+    Condition: ShouldDeployDefaultApprovalFlowResources
     Properties:
       Description: 'AWS COA - Lambda Function that validates the taskToken before allowing access to the API Gateway'
-      FunctionName: !Sub ${AWS::StackName}-COA-authorizer-Lambda
+      FunctionName: !Sub ${AWS::StackName}-COA-apigw-authorizer
       Handler: index.lambda_handler
-      Runtime: python3.10
+      Runtime: python3.12
       Role: !GetAtt 'LambdaAuthorizerRole.Arn'
       MemorySize: 128
       Timeout: 60
@@ -117,6 +150,7 @@ Resources:
 
   LambdaAuthorizerRole:
     Type: AWS::IAM::Role
+    Condition: ShouldDeployDefaultApprovalFlowResources
     Properties:
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -141,10 +175,13 @@ Resources:
               - Effect: Allow
                 Action:
                   - 'states:SendTaskHeartbeat'
-                Resource: !GetAtt 'StepFunction.Arn'
+                Resource:
+                  - !Ref StepFunctionEC2Recommendation
+                  - !Ref StepFunctionEBSRecommendation
 
   AuthorizerLambdaInvoke:
     Type: AWS::Lambda::Permission
+    Condition: ShouldDeployDefaultApprovalFlowResources
     Properties:
       Action: 'lambda:InvokeFunction'
       FunctionName: !GetAtt 'AuthorizerLambda.Arn'
@@ -153,13 +190,15 @@ Resources:
 
   ProxyResource:
     Type: AWS::ApiGateway::Resource
+    Condition: ShouldDeployDefaultApprovalFlowResources
     Properties:
       ParentId: !GetAtt ApiGateway.RootResourceId
       RestApiId: !Ref ApiGateway
-      PathPart: ec2
+      PathPart: coa
 
   ApiGatewayRootMethod:
     Type: AWS::ApiGateway::Method
+    Condition: ShouldDeployDefaultApprovalFlowResources
     Properties:
       AuthorizationType: CUSTOM
       AuthorizerId: !Ref 'Authorizer'
@@ -176,6 +215,7 @@ Resources:
 
   ApiGatewayDeployment:
     Type: AWS::ApiGateway::Deployment
+    Condition: ShouldDeployDefaultApprovalFlowResources
     DependsOn:
       - 'ApiGatewayRootMethod'
     Properties:
@@ -184,11 +224,12 @@ Resources:
 
   LambdaApiGWApprovalFunction:
     Type: AWS::Lambda::Function
+    Condition: ShouldDeployDefaultApprovalFlowResources
     Properties:
       Description: 'AWS COA - Lambda Function that get the approval/rejection from the customer and updates the step function execution'
       FunctionName: !Sub ${AWS::StackName}-COA-apigw-approval
       Handler: index.lambda_handler
-      Runtime: python3.10
+      Runtime: python3.12
       Role: !GetAtt 'LambdaApiGWApprovalRole.Arn'
       MemorySize: 128
       Timeout: 60
@@ -225,54 +266,40 @@ Resources:
 
           def lambda_handler(event, context):
               action = event['queryStringParameters']['action']
+              service = event['queryStringParameters']['service']
               task_token = event['queryStringParameters']['taskToken']
-              ec2_id = event['queryStringParameters']['ec2_id']
-              instance_arn = event['queryStringParameters']['instance_arn']
-              ec2_new_instance_type = event['queryStringParameters']['ec2_new_instance_type']
-              ec2_current_instance_type = event['queryStringParameters']['ec2_current_instance_type']
               
               maintance_window_utc_timestamp = determine_next_maintenance_window()
               
-              stepfunctions = boto3.client('stepfunctions')
-              
               stepfunction_event = ""
               message = ""
-
-              if action == "approved":
+              
+              if service == 'ebs':
                   stepfunction_event = { 
-                      "Status": "Approved",
-                      "ec2_id": ec2_id,
-                      "InstanceArn": instance_arn,
-                      "ec2_new_instance_type": ec2_new_instance_type,
-                      "ec2_current_instance_type": ec2_current_instance_type,
+                      "Status": action,
                       "maintenance_window": maintance_window_utc_timestamp
                   }
-
+              
+              if service == 'ec2':
+                  stepfunction_event = { 
+                      "Status": action,
+                      "maintenance_window": maintance_window_utc_timestamp
+                  }
+              
+              if action == "Approved":
                   message = """
                   Thank you!
                   
                   We’ll update the resources with the recommendations!
                   """
-              elif action == "rejected":
-                  stepfunction_event = { 
-                      "Status": "Rejected",
-                      "ec2_id": ec2_id,
-                      "InstanceArn": instance_arn,
-                      "ec2_new_instance_type": ec2_new_instance_type,
-                      "ec2_current_instance_type": ec2_current_instance_type,
-                      "maintenance_window": maintance_window_utc_timestamp
-                  }
+                  
+              if action == "Rejected":
                   message = """
                   The update was canceled.
                   
                   If the resource continues to be flagged by AWS Compute Optimizer, we will attempt the update again during the next cycle.
                   """
-              else:
-                  print("Unrecognized action. Expected: approve, reject.")
-                  return {
-                      "statusCode": 500,
-                      "body": json.dumps({"Status": "Failed to process the request. Unrecognized Action."})
-                  }
+
 
               try:
                   stepfunctions = boto3.client('stepfunctions')
@@ -293,6 +320,7 @@ Resources:
 
   LambdaApiGWApprovalInvoke:
     Type: AWS::Lambda::Permission
+    Condition: ShouldDeployDefaultApprovalFlowResources
     Properties:
       Action: 'lambda:InvokeFunction'
       FunctionName: !GetAtt 'LambdaApiGWApprovalFunction.Arn'
@@ -301,6 +329,7 @@ Resources:
 
   LambdaApiGWApprovalRole:
     Type: AWS::IAM::Role
+    Condition: ShouldDeployDefaultApprovalFlowResources
     Properties:
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -321,22 +350,25 @@ Resources:
                   - logs:CreateLogGroup
                   - logs:CreateLogStream
                   - logs:PutLogEvents
-                Resource: !Sub 'arn:${AWS::Partition}:logs:*:*:*'
+                Resource: 
+                  - !Sub 'arn:${AWS::Partition}:logs:*:*:*'
               - Effect: Allow
                 Action:
                   - 'states:SendTaskSuccess'
                 Resource: 
-                  - !GetAtt StepFunction.Arn
+                  - !Ref StepFunctionEC2Recommendation
+                  - !Ref StepFunctionEBSRecommendation
 
-  # Begin Lambda that send the email for approval
+  # Lambda that send the email for approval
 
   LambdaSendEmailApprovalFunction:
     Type: AWS::Lambda::Function
+    Condition: ShouldDeployDefaultApprovalFlowResources
     Properties:
       Description: 'AWS COA - Lambda Function that send the email in order to get the user approval'
-      FunctionName: !Sub ${AWS::StackName}-COA-send-email-approval
+      FunctionName: !Sub ${AWS::StackName}-COA-general-send-approval-email
       Handler: index.lambda_handler
-      Runtime: python3.10
+      Runtime: python3.12
       Role: !GetAtt 'LambdaSendEmailApprovalRole.Arn'
       MemorySize: 128
       Timeout: 60
@@ -344,71 +376,300 @@ Resources:
       Environment:
         Variables:
           SNSTopic: !Ref SNSTopic
-          ApiGwEndpoint: !Sub https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/v1/ec2
+          ApiGwEndpoint: !Sub https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/v1/coa
       Code:
         ZipFile: |
           import boto3
           import urllib.parse
           import os
 
-          def lambda_handler(event, context):
-
-              apiGwEndpoint = os.environ.get('ApiGwEndpoint')
-              emailSnsTopic = os.environ.get('SNSTopic')
+          def ebs_approval(event):
               
-              taskToken = urllib.parse.quote(event['taskToken'])
-              ec2_id = event['inputPayload']['ec2_id']
-              instance_arn = event['inputPayload']['InstanceArn']
-              ec2_name = event['inputPayload']['ec2_name']
-              ec2_current_instance_type = event['inputPayload']['ec2_current_instance_type']
-              ec2_new_instance_type = event['inputPayload']['ec2_new_instance_type']
-              migration_effort = event['inputPayload']['migration_effort']
-              performance_risk = event['inputPayload']['performance_risk']
+              apiGwEndpoint = os.environ.get('ApiGwEndpoint')
+              
+              taskToken = urllib.parse.quote(event['detail']['TaskToken'])
+              
+              resource_id = event['detail']['Payload']['resource_id']
+              resource_arn = event['detail']['Payload']['resource_arn']
+              current_resource_type = event['detail']['Payload']['current_VolumeType']
+              current_resource_iops = event['detail']['Payload']['current_VolumeBaselineIOPS']
+              current_resource_Throughput = event['detail']['Payload']['current_VolumeBaselineThroughput']
+              new_resource_type = event['detail']['Payload']['new_VolumeType']
+              new_resource_iops = event['detail']['Payload']['new_VolumeBaselineIOPS']
+              new_resource_Throughput = event['detail']['Payload']['new_VolumeBaselineThroughput']
+              
+              
+              performance_risk = event['detail']['Payload']['performance_risk']
               risk_profile = ['No Risk', 'Very Low', 'Low', 'Medium', 'High', 'Very High']
               risk = risk_profile[int(performance_risk)]
-              savings_opportunity = event['inputPayload']['savings_opportunity']
-              savings_opportunity_percentage = event['inputPayload']['savings_opportunity_percentage']
+              savings_opportunity = round(event['detail']['Payload']['savings_opportunity'], 2)
+              savings_opportunity_percentage = round(event['detail']['Payload']['savings_opportunity_percentage'])
               
-              approveEndpoint = apiGwEndpoint + "?action=approved&taskToken=" + taskToken + "&ec2_id=" + ec2_id + "&ec2_new_instance_type=" + ec2_new_instance_type + "&ec2_current_instance_type=" + ec2_current_instance_type + "&instance_arn=" + instance_arn
-              rejectEndpoint = apiGwEndpoint + "?action=rejected&taskToken=" + taskToken + "&ec2_id=" + ec2_id + "&ec2_new_instance_type=" + ec2_new_instance_type + "&ec2_current_instance_type=" + ec2_current_instance_type + "&instance_arn=" + instance_arn
+              approveEndpoint = f'{apiGwEndpoint}?action=Approved&service=ebs&taskToken={taskToken}'
+              rejectEndpoint = f'{apiGwEndpoint}?action=Rejected&service=ebs&taskToken={taskToken}'
               
-              emailMessage = """ 
+              emailSubject = '[Action Required] AWS COA - Approval for EBS change'
+              
+              emailMessage = f"""
               Hi There,
 
-              We are reaching out, because we need to your approval to update the instance "%s (%s)"
+              We are reaching out because we need your approval to update the resource "{resource_id}"
+              This instance was flagged by AWS Compute Optimizer as being Not Optimized, so we want to make the following changes:
+
+                      * Savings: {savings_opportunity_percentage}% or ${savings_opportunity} per month
+                      * Resource type: from {current_resource_type} to {new_resource_type}
+                      * Resource IOPS: from {current_resource_iops} to {new_resource_iops}
+                      * Resource Throughput: from {current_resource_Throughput} to {new_resource_Throughput}
+                      * Performance Risk: {risk}
+
+              Approve Change -> {approveEndpoint}
+
+              Reject Change -> {rejectEndpoint}
+
+              Thank you!
+              """
+              return emailMessage, emailSubject
+
+          def ec2_approval(event):
+              
+              apiGwEndpoint = os.environ.get('ApiGwEndpoint')
+              
+              taskToken = urllib.parse.quote(event['detail']['TaskToken'])
+              
+              resource_id = event['detail']['Payload']['resource_id']
+              resource_arn = event['detail']['Payload']['resource_arn']
+              resource_name = event['detail']['Payload']['resource_name']
+              current_resource_type = event['detail']['Payload']['current_resource_type']
+              new_resource_type = event['detail']['Payload']['new_resource_type']
+              
+              
+              performance_risk = event['detail']['Payload']['performance_risk']
+              risk_profile = ['No Risk', 'Very Low', 'Low', 'Medium', 'High', 'Very High']
+              risk = risk_profile[int(performance_risk)]
+              savings_opportunity = round(event['detail']['Payload']['savings_opportunity'], 2)
+              savings_opportunity_percentage = round(event['detail']['Payload']['savings_opportunity_percentage'])
+              
+              approveEndpoint = f'{apiGwEndpoint}?action=Approved&service=ec2&taskToken={taskToken}'
+              rejectEndpoint = f'{apiGwEndpoint}?action=Rejected&service=ec2&taskToken={taskToken}'
+
+              emailSubject = '[Action Required] AWS COA - Approval for EC2 change'
+              
+              emailMessage = f"""
+              Hi There,
+
+              We are reaching out because we need your approval to update the instance "{resource_name} ({resource_id})"
               This instance was flagged by AWS Compute Optimizer as being Over Provisioned, so we want to make the following changes:
 
-              \t\t * Instance type: from %s to %s
-              \t\t * Performance Risk: %s
-              \t\t * Savings: %s%% or $%s per month
+                      * Savings: {savings_opportunity_percentage}% or ${savings_opportunity} per month
+                      * Instance type: from {current_resource_type} to {new_resource_type}
+                      * Performance Risk: {risk}
 
-              Approve Change -> %s 
+              Approve Change -> {approveEndpoint}
 
+              Reject Change -> {rejectEndpoint}
 
-              Reject Change -> %s
-              
               Thank you!
+              """
+              return emailMessage, emailSubject
 
-              """ % (ec2_name, ec2_id, ec2_current_instance_type, ec2_new_instance_type, risk, savings_opportunity_percentage, savings_opportunity, approveEndpoint, rejectEndpoint) 
+          def lambda_handler(event, context):
 
+              emailSnsTopic = os.environ.get('SNSTopic')
               
-              sns = boto3.client('sns')
-              params = {
-                  'Message': emailMessage,
-                  'Subject': '[Action Required] Approval for EC2 type change',
-                  'TopicArn': emailSnsTopic
-              }
+              emailMessage = None
+              emailSubject = None
+              
+              if event['detail-type'] == 'aws-coa-ebs-change-approval':
+                  emailMessage, emailSubject = ebs_approval(event)
+              
+              if event['detail-type'] == 'aws-coa-ec2-change-approval':
+                  emailMessage, emailSubject = ec2_approval(event)
+              
+              if emailMessage is not None and emailSubject is not None:
+                  sns = boto3.client('sns')
+                  params = {
+                      'Message': emailMessage,
+                      'Subject': emailSubject,
+                      'TopicArn': emailSnsTopic
+                  }
 
-              try:
-                  response = sns.publish(**params)
-                  print('MessageId: ' + response['MessageId'])
+                  try:
+                      response = sns.publish(**params)
+                      print('MessageId: ' + response['MessageId'])
+                      return None
+
+                  except Exception as e:
+                      print('Error publishing to SNS topic: ' + str(e))
+                      raise e
+              else:
+                  print('Skipping SNS publishing as emailMessage or emailSubject is missing.')
                   return None
 
-              except Exception as e:
-                  print('Error publishing to SNS topic: ' + str(e))
-                  raise e
-
   LambdaSendEmailApprovalRole:
+    Type: AWS::IAM::Role
+    Condition: ShouldDeployDefaultApprovalFlowResources
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Action:
+              - 'sts:AssumeRole'
+            Effect: 'Allow'
+            Principal:
+              Service:
+                - 'lambda.amazonaws.com'
+      Policies:
+        - PolicyName: RolePolicy 
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: 
+                  - !Sub 'arn:${AWS::Partition}:logs:*:*:*' 
+              - Effect: Allow
+                Action:
+                  - 'sns:Publish'
+                Resource: 
+                  - !Ref SNSTopic 
+
+  EventBridgeRuleSendEmailApproval:
+    Type: AWS::Events::Rule
+    Condition: ShouldDeployDefaultApprovalFlowResources
+    Properties:
+      Name: !Sub ${AWS::StackName}-COA-EventBridge-approval-rule
+      Description: EventBridge rule for the default approval flow. This rule will invoke the lambda function that will send the approval email
+      EventBusName: !Ref EventBridgeBus
+      EventPattern:
+        source:
+          - "aws-coa-approval"
+      Targets:
+        - Arn: !GetAtt LambdaSendEmailApprovalFunction.Arn
+          Id: tragetApprovalLambdaFunction
+
+  LambdaSendEmailApprovalInvoke:
+    Type: AWS::Lambda::Permission
+    Condition: ShouldDeployDefaultApprovalFlowResources
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !GetAtt 'LambdaSendEmailApprovalFunction.Arn'
+      Principal: 'events.amazonaws.com'
+      SourceArn: !GetAtt 'EventBridgeRuleSendEmailApproval.Arn'
+
+  SNSTopic:
+    Type: AWS::SNS::Topic
+    Condition: ShouldDeployDefaultApprovalFlowResources
+    Properties:
+      DisplayName: !Sub ${AWS::StackName}-COA-topic
+      Subscription:
+        -
+           Endpoint: !Sub ${Email}
+           Protocol: email
+
+  # END - Default Default Approval Flow
+
+  # START - EBS recommendations
+  # EBS Lambda that validates recommendation
+
+  LambdaValidateEBSRecommendationFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: 'AWS COA - Lambda Function that validates the EBS recommendations fro AWS Compute Optimizer'
+      FunctionName: !Sub ${AWS::StackName}-COA-EBS-validate-recommendation
+      Handler: index.lambda_handler
+      Runtime: python3.12
+      Role: !GetAtt 'LambdaValidateEBSRecommendationRole.Arn'
+      MemorySize: 128
+      Timeout: 60
+      ReservedConcurrentExecutions: !Ref ConcurrencyLimit
+      Environment:
+        Variables:
+          MaintenanceWindowDay: !Ref MaintenanceWindowDay
+          MaintenanceWindowTime: !Ref MaintenanceWindowTime
+          ExcludeTag: !Ref ExcludeTag
+          Approval: !Ref ApprovalRequired
+          ArchitecturalChange: !Ref ArchitecturalChange
+          RiskProfile: !Ref RiskProfile
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+          from datetime import datetime, timedelta
+
+          def determine_next_maintenance_window():
+              maintenance_window_day = os.environ['MaintenanceWindowDay']
+              maintenance_window_time = os.environ['MaintenanceWindowTime']
+
+              # Determine the next maintance window
+              hour = datetime.strptime(maintenance_window_time, "%H:%M").time()
+              weekdays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+              weekday = weekdays.index(maintenance_window_day)
+              now = datetime.utcnow()
+              days_until_maintance_window = (7 + weekday - now.weekday()) % 7
+              if days_until_maintance_window == 0 and now.time() > hour:
+                  days_until_maintance_window = 7
+                  
+              time_until_maintance_window = timedelta(days=days_until_maintance_window)
+              next_maintance_window = now + time_until_maintance_window
+              next_maintance_window = next_maintance_window.replace(hour=hour.hour, minute=hour.minute, second=0, microsecond=0)
+              maintance_window_utc_timestamp = next_maintance_window.strftime("%Y-%m-%dT%H:%M:%SZ")
+              return maintance_window_utc_timestamp
+
+
+          def lambda_handler(event, context):
+              exclude_tag = os.environ['ExcludeTag']
+              approval = os.environ['Approval']
+              risk_profile = ['No Risk', 'Very Low', 'Low', 'Medium', 'High', 'Very High'].index(os.environ['RiskProfile'])
+              resource_id = event['VolumeArn'].split('/')[1]
+              current_VolumeType = event['CurrentConfiguration']['VolumeType']
+              current_VolumeBaselineIOPS = event['CurrentConfiguration']['VolumeBaselineIOPS']
+              current_VolumeBaselineThroughput = event['CurrentConfiguration']['VolumeBaselineThroughput']
+              return_message = {
+                  "change_option_detected": False,
+                  "resource_id": resource_id,
+                  "resource_arn": event['VolumeArn'],
+                  "message": "None of the recommendations met the requirements"
+              }
+              
+              maintance_window_utc_timestamp = determine_next_maintenance_window()
+              
+              ec2 = boto3.client('ec2')
+              response = ec2.describe_volumes(VolumeIds=[resource_id])
+              volume = response['Volumes'][0]
+              
+              if 'Tags' in volume:
+                  tags = volume['Tags']
+                  for tag in tags:
+                      if tag['Key'] == exclude_tag:
+                          return_message["message"] = "The instance is excluded from the Compute Optimization automate recommendations (due to the tag)"
+                          return return_message
+              
+              for recommendation in event['VolumeRecommendationOptions']:
+                  if recommendation['PerformanceRisk'] <= risk_profile and 'SavingsOpportunity' in recommendation:
+                      if recommendation['SavingsOpportunity']['EstimatedMonthlySavings']['Value'] > 0:
+                          return {
+                              "change_option_detected": True,
+                              "approval": approval,
+                              "maintenance_window": maintance_window_utc_timestamp,
+                              "resource_arn": event['VolumeArn'],
+                              "resource_id": resource_id,
+                              "current_VolumeType": current_VolumeType,
+                              "current_VolumeBaselineIOPS": current_VolumeBaselineIOPS,
+                              "current_VolumeBaselineThroughput": current_VolumeBaselineThroughput,
+                              "new_VolumeType": recommendation['Configuration']['VolumeType'],
+                              "new_VolumeBaselineIOPS": recommendation['Configuration']['VolumeBaselineIOPS'],
+                              "new_VolumeBaselineThroughput": recommendation['Configuration']['VolumeBaselineThroughput'],
+                              "performance_risk": recommendation['PerformanceRisk'],
+                              "savings_opportunity": recommendation['SavingsOpportunity']['EstimatedMonthlySavings']['Value'],
+                              "savings_opportunity_percentage": recommendation['SavingsOpportunity']['SavingsOpportunityPercentage']
+                          }      
+              
+              return return_message
+
+  LambdaValidateEBSRecommendationRole:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
@@ -430,22 +691,346 @@ Resources:
                   - logs:CreateLogGroup
                   - logs:CreateLogStream
                   - logs:PutLogEvents
-                Resource: !Sub 'arn:${AWS::Partition}:logs:*:*:*' 
+                Resource: 
+                  - !Sub 'arn:${AWS::Partition}:logs:*:*:*' 
               - Effect: Allow
                 Action:
-                  - 'sns:Publish'
-                Resource: !Ref SNSTopic 
+                  - 'ec2:DescribeVolumes'
+                Resource: '*' 
 
+  # EBS Lambda that update the instance
+
+  LambdaUpdateEBSResourceFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: 'AWS COA - Lambda Function that updates the EC2 instances'
+      FunctionName: !Sub ${AWS::StackName}-COA-EBS-update-resource
+      Handler: index.lambda_handler
+      Runtime: python3.12
+      Role: !GetAtt 'LambdaUpdateEBSResourceRole.Arn'
+      MemorySize: 128
+      Timeout: 900
+      ReservedConcurrentExecutions: !Ref ConcurrencyLimit
+      Code:
+        ZipFile: |
+          import boto3
+
+          def lambda_handler(event, context):
+              resource_id = event['resource_id']
+              volumeType = event['new_VolumeType']
+              volumeIops = event['new_VolumeBaselineIOPS']
+              volumeThroughput = event['new_VolumeBaselineThroughput']
+
+              ec2 = boto3.client('ec2')
+
+              try:
+                  if volumeType == "io2bx" or volumeType == "io1":
+                      if volumeType == "io2bx":
+                          volumeType = "io2"
+                          
+                      ec2.modify_volume(
+                          VolumeId = resource_id, 
+                          VolumeType = volumeType,
+                          Iops = volumeIops
+                      )
+
+                  if volumeType == "gp2":
+                      ec2.modify_volume(
+                          VolumeId = resource_id, 
+                          VolumeType = volumeType
+                      )
+                  if volumeType == "gp3":
+                      ec2.modify_volume(
+                          VolumeId = resource_id, 
+                          VolumeType = volumeType,
+                          Iops = volumeIops,
+                          Throughput = volumeThroughput
+                      )
+                  
+                  return {
+                      "update_successfully": True,
+                      "resource_arn": event['resource_arn'],
+                      "resource_id": resource_id,
+                      "message": f"The EBS volume {resource_id} was successfully updated with the following configuration: type {volumeType}, IOPS {volumeIops} and Throughput {volumeThroughput}"
+                  }
+                  
+              except Exception as e:
+                  print(f"Error updating IOPS: {str(e)}")
+                  return {
+                      "update_successfully": False,
+                      "resource_arn": event['resource_arn'],
+                      "resource_id": resource_id,
+                      "message": f"Failed to update the volume with the following exception: {str(e)}"
+                  }
+
+  LambdaUpdateEBSResourceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Action:
+              - 'sts:AssumeRole'
+            Effect: 'Allow'
+            Principal:
+              Service:
+                - 'lambda.amazonaws.com'
+      Policies:
+        - PolicyName: RolePolicy 
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: 
+                  - !Sub 'arn:${AWS::Partition}:logs:*:*:*' 
+              - Effect: Allow
+                Action:
+                  - 'ec2:ModifyVolume'
+                Resource: '*' 
+
+  # EBS Step Function
+
+  StepFunctionEBSRecommendation:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub ${AWS::StackName}-COA-EBS-StepFunction
+      StateMachineType: STANDARD
+      RoleArn: !GetAtt StepFunctionEBSRecommendationRole.Arn
+      DefinitionString:
+        Fn::Sub: |
+          {
+            "Comment": "A description of my state machine",
+            "StartAt": "GetEBSVolumeRecommendations",
+            "States": {
+              "GetEBSVolumeRecommendations": {
+                "Type": "Task",
+                "Parameters": {},
+                "Resource": "arn:aws:states:::aws-sdk:computeoptimizer:getEBSVolumeRecommendations",
+                "Next": "Iterate Recommendations"
+              },
+              "Iterate Recommendations": {
+                "Type": "Map",
+                "ItemProcessor": {
+                  "ProcessorConfig": {
+                    "Mode": "DISTRIBUTED",
+                    "ExecutionType": "STANDARD"
+                  },
+                  "StartAt": "is Optimizes Choice",
+                  "States": {
+                    "is Optimizes Choice": {
+                      "Type": "Choice",
+                      "Choices": [
+                        {
+                          "Variable": "$.Finding",
+                          "StringEquals": "NotOptimized",
+                          "Next": "validate EBS volume"
+                        }
+                      ],
+                      "Default": "The resource is already optimized"
+                    },
+                    "validate EBS volume": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::lambda:invoke",
+                      "OutputPath": "$.Payload",
+                      "Parameters": {
+                        "Payload.$": "$",
+                        "FunctionName": "${LambdaValidateEBSRecommendationFunction.Arn}"
+                      },
+                      "Retry": [
+                        {
+                          "ErrorEquals": [
+                            "Lambda.ServiceException",
+                            "Lambda.AWSLambdaException",
+                            "Lambda.SdkClientException",
+                            "Lambda.TooManyRequestsException"
+                          ],
+                          "IntervalSeconds": 1,
+                          "MaxAttempts": 3,
+                          "BackoffRate": 2
+                        }
+                      ],
+                      "Next": "Change option detected"
+                    },
+                    "Change option detected": {
+                      "Type": "Choice",
+                      "Choices": [
+                        {
+                          "Variable": "$.change_option_detected",
+                          "BooleanEquals": true,
+                          "Next": "Approval Needed"
+                        }
+                      ],
+                      "Default": "No change needs to be done"
+                    },
+                    "Approval Needed": {
+                      "Type": "Choice",
+                      "Choices": [
+                        {
+                          "Variable": "$.approval",
+                          "StringEquals": "yes",
+                          "Next": "Send Approval Event"
+                        }
+                      ],
+                      "Default": "Wait for MW"
+                    },
+                    "Send Approval Event": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::events:putEvents.waitForTaskToken",
+                      "Parameters": {
+                        "Entries": [
+                          {
+                            "Detail": {
+                              "Payload.$": "$",
+                              "TaskToken.$": "$$.Task.Token"
+                            },
+                            "DetailType": "aws-coa-ebs-change-approval",
+                            "EventBusName": "${EventBridgeBus}",
+                            "Source": "aws-coa-approval"
+                          }
+                        ]
+                      },
+                      "Next": "Approval Choice",
+                      "ResultPath": "$.approvalStatus",
+                      "Catch": [
+                        {
+                          "ErrorEquals": [
+                            "States.Timeout"
+                          ],
+                          "Comment": "72 hours timeout",
+                          "Next": "Change Rejected"
+                        }
+                      ],
+                      "TimeoutSeconds": 259202,
+                      "HeartbeatSeconds": 259200
+                    },
+                    "Approval Choice": {
+                      "Type": "Choice",
+                      "Choices": [
+                        {
+                          "Variable": "$.approvalStatus.Status",
+                          "StringEquals": "Approved",
+                          "Next": "Wait for MW"
+                        }
+                      ],
+                      "Default": "Change Rejected"
+                    },
+                    "Wait for MW": {
+                      "Type": "Wait",
+                      "Next": "Update EBS volume",
+                      "TimestampPath": "$.maintenance_window"
+                    },
+                    "Change Rejected": {
+                      "Type": "Pass",
+                      "End": true,
+                      "Parameters": {
+                        "message": "The change was rejected"
+                      },
+                      "ResultPath": "$"
+                    },
+                    "Update EBS volume": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::lambda:invoke",
+                      "OutputPath": "$.Payload",
+                      "Parameters": {
+                        "Payload.$": "$",
+                        "FunctionName": "${LambdaUpdateEBSResourceFunction.Arn}"
+                      },
+                      "Retry": [
+                        {
+                          "ErrorEquals": [
+                            "Lambda.ServiceException",
+                            "Lambda.AWSLambdaException",
+                            "Lambda.SdkClientException",
+                            "Lambda.TooManyRequestsException"
+                          ],
+                          "IntervalSeconds": 1,
+                          "MaxAttempts": 3,
+                          "BackoffRate": 2
+                        }
+                      ],
+                      "End": true
+                    },
+                    "No change needs to be done": {
+                      "Type": "Pass",
+                      "End": true,
+                      "Parameters": {
+                        "resource_arn.$": "$.resource_arn",
+                        "message.$": "$.message"
+                      },
+                      "ResultPath": "$"
+                    },
+                    "The resource is already optimized": {
+                      "Type": "Pass",
+                      "End": true,
+                      "Parameters": {
+                        "resource_arn.$": "$.VolumeArn",
+                        "message": "The resource is already optimized"
+                      },
+                      "ResultPath": "$"
+                    }
+                  }
+                },
+                "End": true,
+                "ItemsPath": "$.VolumeRecommendations",
+                "Label": "IterateRecommendations",
+                "MaxConcurrency": ${ConcurrencyLimit}
+              }
+            }
+          }
+  
+  StepFunctionEBSRecommendationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: RolePolicy
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'states:StartExecution'
+                Resource: 
+                  - !Sub 'arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${AWS::StackName}-COA-EBS-StepFunction'
+              - Effect: Allow
+                Action:
+                  - 'events:PutEvents'
+                Resource: 
+                  - !GetAtt EventBridgeBus.Arn
+              - Effect: Allow
+                Action:
+                  - 'lambda:InvokeFunction'
+                Resource:
+                  - !GetAtt LambdaValidateEBSRecommendationFunction.Arn
+                  - !GetAtt LambdaUpdateEBSResourceFunction.Arn
+              - Effect: Allow
+                Action:
+                  - 'compute-optimizer:GetEBSVolumeRecommendations'
+                  - 'ec2:DescribeVolumes'
+                Resource: '*'
+  
+  # END - EBS recommendations
+
+  # START - EC2 recommendations
   # Begin Lambda that validates recommendation
 
-  LambdaValidateRecommendationFunction:
+  LambdaValidateEC2RecommendationFunction:
     Type: AWS::Lambda::Function
     Properties:
       Description: 'AWS COA - Lambda Function that validates the compute optimizer recommendations'
-      FunctionName: !Sub ${AWS::StackName}-COA-validate-recommendation
+      FunctionName: !Sub ${AWS::StackName}-COA-EC2-validate-recommendation
       Handler: index.lambda_handler
-      Runtime: python3.10
-      Role: !GetAtt 'LambdaValidateRecommendationRole.Arn'
+      Runtime: python3.12
+      Role: !GetAtt 'LambdaValidateEC2RecommendationRole.Arn'
       MemorySize: 128
       Timeout: 60
       ReservedConcurrentExecutions: !Ref ConcurrencyLimit
@@ -454,7 +1039,7 @@ Resources:
           MaintenanceWindowDay: !Ref MaintenanceWindowDay
           MaintenanceWindowTime: !Ref MaintenanceWindowTime
           ExcludeTag: !Ref ExcludeTag
-          EmailApproval: !Ref EmailApproval
+          Approval: !Ref ApprovalRequired
           ArchitecturalChange: !Ref ArchitecturalChange
           RiskProfile: !Ref RiskProfile
       Code:
@@ -486,30 +1071,30 @@ Resources:
           def lambda_handler(event, context):
               
               exclude_tag = os.environ['ExcludeTag']
-              email_approval = os.environ['EmailApproval']
+              approval = os.environ['Approval']
               architectural_change = os.environ['ArchitecturalChange']
               risk_profile = ['No Risk', 'Very Low', 'Low', 'Medium', 'High', 'Very High'].index(os.environ['RiskProfile'])
-              ec2_id = event['InstanceArn'].split('/')[1]
+              resource_id = event['InstanceArn'].split('/')[1]
               region = event['InstanceArn'].split(':')[3]
               return_message = {
                   "change_option_detected": False,
-                  "ec2_id": ec2_id,
-                  "InstanceArn": event['InstanceArn'],
-                  "ec2_name": event['InstanceName'],
+                  "resource_id": resource_id,
+                  "resource_arn": event['InstanceArn'],
+                  "resource_name": event['InstanceName'],
                   "message": "None of the recommendations met the requirements"
               }
               
               maintance_window_utc_timestamp = determine_next_maintenance_window()
 
               ec2 = boto3.resource('ec2')
-              ec2_instance = ec2.Instance(ec2_id)
+              ec2_instance = ec2.Instance(resource_id)
               stop_protection = ec2_instance.describe_attribute(Attribute='disableApiStop')
               if stop_protection['DisableApiStop']['Value'] == True:
                   return_message["message"] = "The instance was configured with Stop Protection"
                   return return_message
 
               ec2_client = boto3.client('ec2', region_name=region)
-              response = ec2_client.describe_instances(InstanceIds=[ec2_id])
+              response = ec2_client.describe_instances(InstanceIds=[resource_id])
               tags = response['Reservations'][0]['Instances'][0]['Tags']
 
               for tag in tags:
@@ -528,16 +1113,6 @@ Resources:
               if response['Reservations'][0]['Instances'][0]['Placement']['GroupName'] != '':
                   return_message["message"] = "The instance is part of a Placement Group"
                   return return_message
-              
-              # # Validate that the instance has CloudWatch Agent installed
-              # cw_agent_installed = False
-              # for utilization_metric in event['UtilizationMetrics']:
-              #     if utilization_metric['Name'] == 'MEMORY':
-              #         cw_agent_installed = True
-              
-              # if not cw_agent_installed:
-              #     return_message["message"] = 'The instance does not have CloudWatch Agent installed'
-              #     return return_message
                       
               for recommendation in event['RecommendationOptions']:
                   if recommendation['PerformanceRisk'] <= risk_profile and 'SavingsOpportunity' in recommendation:
@@ -552,23 +1127,24 @@ Resources:
                               continue
                           
                           return {
-                              "change_option_detected": True,
-                              "email_approval": email_approval,
-                              "maintenance_window": maintance_window_utc_timestamp,
-                              "InstanceArn": event['InstanceArn'],
-                              "ec2_id": ec2_id,
-                              "ec2_name": event['InstanceName'],
-                              "ec2_new_instance_type": recommendation['InstanceType'],
-                              "ec2_current_instance_type": event['CurrentInstanceType'],
-                              "migration_effort": recommendation['MigrationEffort'],
-                              "performance_risk": recommendation['PerformanceRisk'],
-                              "savings_opportunity": recommendation['SavingsOpportunity']['EstimatedMonthlySavings']['Value'],
-                              "savings_opportunity_percentage": recommendation['SavingsOpportunity']['SavingsOpportunityPercentage']
-                          }
+                            "change_option_detected": True,
+                            "approval": approval,
+                            "maintenance_window": maintance_window_utc_timestamp,
+                            "InstanceArn": event['InstanceArn'],
+                            "resource_id": resource_id,
+                            "resource_arn": event['InstanceArn'],
+                            "resource_name": event['InstanceName'],
+                            "current_resource_type": event['CurrentInstanceType'],
+                            "new_resource_type": recommendation['InstanceType'],
+                            "migration_effort": recommendation['MigrationEffort'],
+                            "performance_risk": recommendation['PerformanceRisk'],
+                            "savings_opportunity": recommendation['SavingsOpportunity']['EstimatedMonthlySavings']['Value'],
+                            "savings_opportunity_percentage": recommendation['SavingsOpportunity']['SavingsOpportunityPercentage']
+                        }
                       
               return return_message
 
-  LambdaValidateRecommendationRole:
+  LambdaValidateEC2RecommendationRole:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
@@ -597,80 +1173,87 @@ Resources:
                   - 'ec2:DescribeInstanceAttribute'
                 Resource: '*' 
 
-  # Begin Lambda that update the instance
+  # EC2 Lambda that update the instance
 
-  LambdaUpdateInstanceFunction:
+  LambdaUpdateEC2ResourceFunction:
     Type: AWS::Lambda::Function
     Properties:
       Description: 'AWS COA - Lambda Function that updates the EC2 instances'
-      FunctionName: !Sub ${AWS::StackName}-COA-update-instance
+      FunctionName: !Sub ${AWS::StackName}-COA-EC2-update-resource
       Handler: index.lambda_handler
-      Runtime: python3.10
-      Role: !GetAtt 'LambdaUpdateInstanceRole.Arn'
+      Runtime: python3.12
+      Role: !GetAtt 'LambdaUpdateEC2ResourceRole.Arn'
       MemorySize: 128
       Timeout: 900
       ReservedConcurrentExecutions: !Ref ConcurrencyLimit
+      Environment:
+        Variables:
+          EBSSnapshot: !Ref EBSSnapshot
       Code:
         ZipFile: |
           import boto3
+          import os
 
           def lambda_handler(event, context):
-              ec2_id = event['ec2_id']
-              ec2_new_instance_type = event['ec2_new_instance_type']
-              ec2_current_instance_type = event['ec2_current_instance_type']
+              resource_id = event['resource_id']
+              new_resource_type = event['new_resource_type']
+              current_resource_type = event['current_resource_type']
               message = "Failed to update the instance. Please validate the Logs"
               
               update_successfully = False
               
               ec2 = boto3.resource('ec2')
-              ec2_instance = ec2.Instance(ec2_id)
+              ec2_instance = ec2.Instance(resource_id)
 
-              #create snapshot before the update
-              volumes = ec2_instance.volumes.all()
-              for volume in volumes:
-                  snapshot = volume.create_snapshot()
-                  snapshot.create_tags(Tags=[{"Key": "created-by", "Value": "compute-optimizer-automation"}])
-                  print(f"Snapshot {snapshot.id} was created for volume {volume.id}")    
+              ebs_snapshot_required = os.environ.get('EBSSnapshot')
+
+              #create snapshot before making the update
+              if ebs_snapshot_required == 'yes':
+                volumes = ec2_instance.volumes.all()
+                for volume in volumes:
+                    snapshot = volume.create_snapshot()
+                    snapshot.create_tags(Tags=[{"Key": "created-by", "Value": "compute-optimizer-automation"}])
+                    print(f"Snapshot {snapshot.id} was created for volume {volume.id}")    
               
               if ec2_instance.state['Name'] == 'running':
                   try:
                       ec2_instance.stop()
                       ec2_instance.wait_until_stopped()
-                      ec2_instance.modify_attribute(InstanceType={'Value':ec2_new_instance_type})
+                      ec2_instance.modify_attribute(InstanceType={'Value':new_resource_type})
                       ec2_instance.start()
                       ec2_instance.wait_until_running()
                       update_successfully = True
-                      message = "The EC2 instance %s was successfully updated to %s" % (ec2_id, ec2_new_instance_type)
+                      message = "The EC2 instance %s was successfully updated to %s" % (resource_id, new_resource_type)
                   except Exception as e:
                       print('Error during the update: ' + str(e))
                       print('Rolling back to previous configuration')
                       ec2_instance.stop()
                       ec2_instance.wait_until_stopped()
-                      ec2_instance.modify_attribute(InstanceType={'Value':ec2_current_instance_type})
+                      ec2_instance.modify_attribute(InstanceType={'Value':current_resource_type})
                       ec2_instance.start()
                       ec2_instance.wait_until_running()
 
               elif ec2_instance.state['Name'] == 'stopped':
                   try: 
-                      ec2_instance.modify_attribute(InstanceType={'Value':ec2_new_instance_type})
+                      ec2_instance.modify_attribute(InstanceType={'Value':new_resource_type})
                       update_successfully = True
-                      message = "The EC2 instance %s was successfully updated to %s" % (ec2_id, ec2_new_instance_type)
+                      message = "The EC2 instance %s was successfully updated to %s" % (resource_id, new_resource_type)
                   except Exception as e:
                       print('Error during the update: ' + str(e))
                       print('Rolling back to previous configuration')
-                      ec2_instance.modify_attribute(InstanceType={'Value':ec2_current_instance_type})
+                      ec2_instance.modify_attribute(InstanceType={'Value':current_resource_type})
                       
               else:
                   print("Something is wrong with the state of the instance")
               
               return {
                   "update_successfully": update_successfully,
-                  "ec2_id": ec2_id,
+                  "resource_id": resource_id,
                   "message": message,
-                  "InstanceArn": event['InstanceArn']
+                  "resource_arn": event['InstanceArn']
               }
 
-  LambdaUpdateInstanceRole:
+  LambdaUpdateEC2ResourceRole:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
@@ -704,84 +1287,50 @@ Resources:
                   - 'ec2:CreateSnapshot'
                 Resource: '*' 
 
-  # Begin Lambda that makes the rollback and send the email
+  # EC2 Lambda that makes the rollback
 
-  LambdaSendRollbackEmailFunction:
+  LambdaEC2RollbackFunction:
     Type: AWS::Lambda::Function
     Properties:
       Description: 'AWS COA - Lambda Function that rollback the instance and send an email to the customer'
-      FunctionName: !Sub ${AWS::StackName}-COA-instance-rollback-and-email
+      FunctionName: !Sub ${AWS::StackName}-COA-EC2-rollback
       Handler: index.lambda_handler
-      Runtime: python3.10
-      Role: !GetAtt 'LambdaSendRollbackEmailRole.Arn'
+      Runtime: python3.12
+      Role: !GetAtt 'LambdaEC2RollbackRole.Arn'
       MemorySize: 128
       Timeout: 900
       ReservedConcurrentExecutions: !Ref ConcurrencyLimit
-      Environment:
-        Variables:
-          SNSTopic: !Ref SNSTopic
       Code:
         ZipFile: |
           import boto3
-          import os
 
           def lambda_handler(event, context):
               
-              ec2_id = event['ec2_id']
-
-              if 'update_successfully' not in event:
-                  ec2 = boto3.resource('ec2')
-                  ec2_instance = ec2.Instance(ec2_id)
-
-                  ec2_current_instance_type = event['ec2_current_instance_type']
-
-                  if ec2_instance.instance_type != ec2_current_instance_type:
+              resource_id = event['resource_id']
+              current_resource_type = event['current_resource_type']
+              
+              try:
+                  if ec2_instance.instance_type != current_resource_type:
                       if ec2_instance.state['Name'] == 'running':
                           ec2_instance.stop()
                           ec2_instance.wait_until_stopped()
-                          ec2_instance.modify_attribute(InstanceType={'Value':ec2_current_instance_type})
-                          ec2_instance.start()
-                          ec2_instance.wait_until_running()
-                      if ec2_instance.state['Name'] == 'stopped':
-                          ec2_instance.modify_attribute(InstanceType={'Value':ec2_current_instance_type})
 
-              emailSnsTopic = os.environ.get('SNSTopic')
-              
-              emailMessage = """ 
-              Hi There,
-
-              We want to notify you that during the instance upgrade process, we found an error and reverted all the changes for the following instance:
-
-              \t\t * Instance : "%s"
-
-              Please note that the instance is already up and running, and if the resource continues to be flagged by AWS Compute Optimizer, we will try again during the next maintenance window.
-              
-              Thank you!
-
-              """ % (ec2_id) 
-
-              sns = boto3.client('sns')
-              params = {
-                  'Message': emailMessage,
-                  'Subject': '[Info] Update about EC2 instance change',
-                  'TopicArn': emailSnsTopic
-              }
-
-              try:
-                  response = sns.publish(**params)
-                  print('MessageId: ' + response['MessageId'])
-
+                      ec2_instance.modify_attribute(InstanceType={'Value':current_resource_type})
+                      ec2_instance.start()
+                      ec2_instance.wait_until_running()
+                  
+                  return {
+                      "resource_id": resource_id,
+                      "message": 'The change was successfully rollback due to an issue',
+                      "EC2_instance": event['InstanceArn']
+                  }
+                      
               except Exception as e:
-                  print('Error publishing to SNS topic: ' + str(e))
+                  print(f"Error during the rollback: {e}")  
+                  print(f"The input parameter were: {event}") 
                   raise e
-              
-              return {
-                  "ec2_id": ec2_id,
-                  "message": 'The change was successfully rollback due to an issue',
-                  "EC2_instance": event['InstanceArn']
-              }
 
-  LambdaSendRollbackEmailRole:
+  LambdaEC2RollbackRole:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
@@ -806,24 +1355,20 @@ Resources:
                 Resource: !Sub 'arn:${AWS::Partition}:logs:*:*:*' 
               - Effect: Allow
                 Action:
-                  - 'sns:Publish'
-                Resource: !Ref SNSTopic
-              - Effect: Allow
-                Action:
                   - 'ec2:DescribeInstances'
                   - 'ec2:StartInstances'
                   - 'ec2:ModifyInstanceAttribute'
                   - 'ec2:StopInstances'
                 Resource: '*'
 
-  # Begin Step Function
+  # EC2 Step Function
 
-  StepFunction:
+  StepFunctionEC2Recommendation:
     Type: AWS::StepFunctions::StateMachine
     Properties:
-      StateMachineName: !Sub ${AWS::StackName}-COA-StepFunction
+      StateMachineName: !Sub ${AWS::StackName}-COA-EC2-StepFunction
       StateMachineType: STANDARD
-      RoleArn: !GetAtt StepFunctionRole.Arn
+      RoleArn: !GetAtt StepFunctionEC2RecommendationRole.Arn
       DefinitionString:
         Fn::Sub: |
           {
@@ -851,18 +1396,18 @@ Resources:
                         {
                           "Variable": "$.Finding",
                           "StringEquals": "OVER_PROVISIONED",
-                          "Next": "validate-instance"
+                          "Next": "validate EC2 instance"
                         }
                       ],
-                      "Default": "The instance is already optimized"
+                      "Default": "The resource is already optimized"
                     },
-                    "validate-instance": {
+                    "validate EC2 instance": {
                       "Type": "Task",
                       "Resource": "arn:aws:states:::lambda:invoke",
                       "OutputPath": "$.Payload",
                       "Parameters": {
                         "Payload.$": "$",
-                        "FunctionName": "${LambdaValidateRecommendationFunction.Arn}"
+                        "FunctionName": "${LambdaValidateEC2RecommendationFunction.Arn}"
                       },
                       "Retry": [
                         {
@@ -885,63 +1430,57 @@ Resources:
                         {
                           "Variable": "$.change_option_detected",
                           "BooleanEquals": true,
-                          "Next": "Email Approval Needed"
+                          "Next": "Approval Needed"
                         }
                       ],
                       "Default": "No change needs to be done"
                     },
-                    "Email Approval Needed": {
+                    "Approval Needed": {
                       "Type": "Choice",
                       "Choices": [
                         {
-                          "Variable": "$.email_approval",
+                          "Variable": "$.approval",
                           "StringEquals": "yes",
-                          "Next": "Send Approval Email"
+                          "Next": "Send Approval Event"
                         }
                       ],
                       "Default": "Wait for MW"
                     },
-                    "Send Approval Email": {
+                    "Send Approval Event": {
                       "Type": "Task",
-                      "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
+                      "Resource": "arn:aws:states:::events:putEvents.waitForTaskToken",
                       "Parameters": {
-                        "FunctionName": "${LambdaSendEmailApprovalFunction.Arn}",
-                        "Payload": {
-                          "inputPayload.$": "$",
-                          "taskToken.$": "$$.Task.Token"
-                        }
+                        "Entries": [
+                          {
+                            "Detail": {
+                              "Payload.$": "$",
+                              "TaskToken.$": "$$.Task.Token"
+                            },
+                            "DetailType": "aws-coa-ec2-change-approval",
+                            "EventBusName": "${EventBridgeBus}",
+                            "Source": "aws-coa-approval"
+                          }
+                        ]
                       },
-                      "Retry": [
-                        {
-                          "ErrorEquals": [
-                            "Lambda.ServiceException",
-                            "Lambda.AWSLambdaException",
-                            "Lambda.SdkClientException",
-                            "Lambda.TooManyRequestsException"
-                          ],
-                          "IntervalSeconds": 2,
-                          "MaxAttempts": 6,
-                          "BackoffRate": 2
-                        }
-                      ],
                       "Next": "Approval Choice",
-                      "HeartbeatSeconds": 259200,
-                      "TimeoutSeconds": 259202,
                       "Catch": [
                         {
                           "ErrorEquals": [
                             "States.Timeout"
                           ],
-                          "Next": "Change Rejected",
-                          "Comment": "72 hours timeout"
+                          "Comment": "72 hours timeout",
+                          "Next": "Change Rejected"
                         }
-                      ]
+                      ],
+                      "TimeoutSeconds": 259202,
+                      "HeartbeatSeconds": 259200,
+                      "ResultPath": "$.approvalStatus"
                     },
                     "Approval Choice": {
                       "Type": "Choice",
                       "Choices": [
                         {
-                          "Variable": "$.Status",
+                          "Variable": "$.approvalStatus.Status",
                           "StringEquals": "Approved",
                           "Next": "Wait for MW"
                         }
@@ -959,7 +1498,7 @@ Resources:
                       "OutputPath": "$.Payload",
                       "Parameters": {
                         "Payload.$": "$",
-                        "FunctionName": "${LambdaUpdateInstanceFunction.Arn}"
+                        "FunctionName": "${LambdaUpdateEC2ResourceFunction.Arn}"
                       },
                       "Retry": [
                         {
@@ -981,7 +1520,7 @@ Resources:
                             "States.ALL"
                           ],
                           "Comment": "rollback",
-                          "Next": "Rollback and email",
+                          "Next": "Rollback",
                           "ResultPath": null
                         }
                       ]
@@ -992,18 +1531,18 @@ Resources:
                         {
                           "Variable": "$.update_successfully",
                           "BooleanEquals": false,
-                          "Next": "Rollback and email"
+                          "Next": "Rollback"
                         }
                       ],
-                      "Default": "Instance Updated"
+                      "Default": "Resource Updated"
                     },
-                    "Rollback and email": {
+                    "Rollback": {
                       "Type": "Task",
                       "Resource": "arn:aws:states:::lambda:invoke",
                       "OutputPath": "$.Payload",
                       "Parameters": {
                         "Payload.$": "$",
-                        "FunctionName": "${LambdaSendRollbackEmailFunction.Arn}"
+                        "FunctionName": "${LambdaEC2RollbackFunction.Arn}"
                       },
                       "Retry": [
                         {
@@ -1020,45 +1559,40 @@ Resources:
                       ],
                       "End": true
                     },
-                    "Instance Updated": {
+                    "Resource Updated": {
                       "Type": "Pass",
                       "End": true,
                       "Parameters": {
-                        "EC2_instance.$": "$.InstanceArn",
-                        "Result": "The instance was successfully updated."
+                        "resource_arn.$": "$.resource_arn",
+                        "message.$": "$.message"
                       },
-                      "ResultPath": "$.finalResult",
-                      "OutputPath": "$.finalResult"
+                      "ResultPath": "$"
                     },
                     "Change Rejected": {
                       "Type": "Pass",
                       "End": true,
                       "Parameters": {
-                        "EC2_instance.$": "$.InstanceArn",
-                        "Result": "The instance had a valid change, but it was rejected by the approver."
+                        "message": "The change was rejected"
                       },
-                      "ResultPath": "$.finalResult",
-                      "OutputPath": "$.finalResult"
+                      "ResultPath": "$"
                     },
                     "No change needs to be done": {
                       "Type": "Pass",
                       "End": true,
                       "Parameters": {
-                        "EC2_instance.$": "$.InstanceArn",
-                        "Result.$": "$.message"
+                        "resource_arn.$": "$.resource_arn",
+                        "message.$": "$.message"
                       },
-                      "ResultPath": "$.finalResult",
-                      "OutputPath": "$.finalResult"
+                      "ResultPath": "$"
                     },
-                    "The instance is already optimized": {
+                    "The resource is already optimized": {
                       "Type": "Pass",
-                      "Parameters": {
-                        "EC2_instance.$": "$.InstanceArn",
-                        "Result": "The instance is already optimized"
-                      },
-                      "ResultPath": "$.finalResult",
                       "End": true,
-                      "OutputPath": "$.finalResult"
+                      "Parameters": {
+                        "resource_arn.$": "$.InstanceArn",
+                        "message": "The resource is already optimized"
+                      },
+                      "ResultPath": "$"
                     }
                   }
                 },
@@ -1070,7 +1604,7 @@ Resources:
             }
           }
   
-  StepFunctionRole:
+  StepFunctionEC2RecommendationRole:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
@@ -1086,18 +1620,127 @@ Resources:
             Statement:
               - Effect: Allow
                 Action:
+                  - 'states:StartExecution'
+                Resource: 
+                  - !Sub 'arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${AWS::StackName}-COA-EC2-StepFunction'
+              - Effect: Allow
+                Action:
+                  - 'events:PutEvents'
+                Resource: 
+                  - !GetAtt EventBridgeBus.Arn
+              - Effect: Allow
+                Action:
                   - 'lambda:InvokeFunction'
+                Resource:
+                  - !GetAtt LambdaValidateEC2RecommendationFunction.Arn 
+                  - !GetAtt LambdaUpdateEC2ResourceFunction.Arn
+                  - !GetAtt LambdaEC2RollbackFunction.Arn
+              - Effect: Allow
+                Action:
                   - 'compute-optimizer:GetEC2InstanceRecommendations'
                   - 'ec2:DescribeInstances'
-                  - 'states:StartExecution'
                 Resource: '*'
 
+  # END - EC2 recommendations
+
+  # STAR - MAIN Flow
+
+  StepFunctionMainRecommendation:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub ${AWS::StackName}-COA-Main-StepFunction
+      StateMachineType: STANDARD
+      RoleArn: !GetAtt StepFunctionMainRecommendationRole.Arn
+      DefinitionString:
+        Fn::Sub: |
+          {
+            "Comment": "A description of my state machine",
+            "StartAt": "AutomateEC2Recommendations",
+            "States": {
+              "AutomateEC2Recommendations": {
+                "Type": "Choice",
+                "Choices": [
+                  {
+                    "Variable": "$.AutomateEC2Recommendations",
+                    "StringEquals": "yes",
+                    "Next": "EC2 StepFunction"
+                  }
+                ],
+                "Default": "AutomateEBSRecommendations"
+              },
+              "EC2 StepFunction": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::states:startExecution",
+                "Parameters": {
+                  "StateMachineArn": "${StepFunctionEC2Recommendation.Arn}",
+                  "Input": {}
+                },
+                "Next": "AutomateEBSRecommendations",
+                "ResultPath": null
+              },
+              "AutomateEBSRecommendations": {
+                "Type": "Choice",
+                "Choices": [
+                  {
+                    "Variable": "$.AutomateEBSRecommendations",
+                    "StringEquals": "yes",
+                    "Next": "EBS StepFunction"
+                  }
+                ],
+                "Default": "Pass"
+              },
+              "Pass": {
+                "Type": "Pass",
+                "End": true
+              },
+              "EBS StepFunction": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::states:startExecution",
+                "Parameters": {
+                  "StateMachineArn": "${StepFunctionEBSRecommendation.Arn}",
+                  "Input": {}
+                },
+                "End": true,
+                "ResultPath": null
+              }
+            }
+          }
+  
+  StepFunctionMainRecommendationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: RolePolicy
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'states:StartExecution'
+                  - 'states:DescribeExecution'
+                  - 'states:StopExecution'
+                Resource: 
+                  - !Ref StepFunctionEC2Recommendation
+                  - !Ref StepFunctionEBSRecommendation
+              - Effect: Allow
+                Action:
+                  - 'events:PutTargets'
+                  - 'events:PutRule'
+                  - 'events:DescribeRule'
+                Resource: !Sub 'arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/StepFunctionsGetEventsForStepFunctionsExecutionRule'
+  
   EventBridgeScheduleFirstMonday:
     Type: AWS::Scheduler::Schedule
-    DependsOn: StepFunction
+    DependsOn: StepFunctionMainRecommendation
     Properties:
       Name: !Sub ${AWS::StackName}-COA-EventBridge-Schedule-FirstMonday
-      Description: 'AWS COA - EventBridge schedule that starts the AWS COA every the first Monday of the month at 8 am'
+      Description: 'AWS COA - EventBridge schedule that starts the AWS COA the first Monday of the month at 8 am'
       FlexibleTimeWindow:
         Mode: FLEXIBLE
         MaximumWindowInMinutes: 5
@@ -1106,14 +1749,20 @@ Resources:
       State: ENABLED
       Target:
         RoleArn: !GetAtt EventBridgeScheduleRole.Arn
-        Arn: !GetAtt StepFunction.Arn
+        Arn: !GetAtt StepFunctionMainRecommendation.Arn
+        Input: 
+          Fn::Sub: |
+            {
+              "AutomateEC2Recommendations": "${AutomateEC2Recommendations}", 
+              "AutomateEBSRecommendations": "${AutomateEBSRecommendations}"
+            }
   
   EventBridgeScheduleThirdMonday:
     Type: AWS::Scheduler::Schedule
-    DependsOn: StepFunction
+    DependsOn: StepFunctionMainRecommendation
     Properties:
       Name: !Sub ${AWS::StackName}-COA-EventBridge-Schedule-ThirdMonday
-      Description: 'AWS COA - EventBridge schedule that starts the AWS COA every the third Monday of the month at 8 am'
+      Description: 'AWS COA - EventBridge schedule that starts the AWS COA the third Monday of the month at 8 am'
       FlexibleTimeWindow:
         Mode: FLEXIBLE
         MaximumWindowInMinutes: 5
@@ -1122,7 +1771,13 @@ Resources:
       State: ENABLED
       Target:
         RoleArn: !GetAtt EventBridgeScheduleRole.Arn
-        Arn: !GetAtt StepFunction.Arn
+        Arn: !GetAtt StepFunctionMainRecommendation.Arn
+        Input: 
+          Fn::Sub: |
+            {
+              "AutomateEC2Recommendations": "${AutomateEC2Recommendations}", 
+              "AutomateEBSRecommendations": "${AutomateEBSRecommendations}"
+            }
 
   EventBridgeScheduleRole:
     Type: AWS::IAM::Role
@@ -1146,20 +1801,9 @@ Resources:
                 Action:
                   - 'states:StartExecution'
                 Resource: 
-                  - !GetAtt StepFunction.Arn
+                  - !Ref StepFunctionMainRecommendation
 
-  # Begin SNS 
-
-  SNSTopic:
-    Type: AWS::SNS::Topic
-    Properties:
-      DisplayName: !Sub ${AWS::StackName}-COA-topic
-      Subscription:
-        -
-           Endpoint: !Sub ${Email}
-           Protocol: email
-
-  # Analytics: used by COA team to track adoption, by retrieving AWS AccountId
+# Analytics: used by COA team to track adoption, by retrieving AWS AccountId
 
   COALambdaAnalyticsRole:
     Type: "AWS::IAM::Role"

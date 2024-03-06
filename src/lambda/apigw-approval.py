@@ -24,54 +24,40 @@ def determine_next_maintenance_window():
 
 def lambda_handler(event, context):
     action = event['queryStringParameters']['action']
+    service = event['queryStringParameters']['service']
     task_token = event['queryStringParameters']['taskToken']
-    ec2_id = event['queryStringParameters']['ec2_id']
-    instance_arn = event['queryStringParameters']['instance_arn']
-    ec2_new_instance_type = event['queryStringParameters']['ec2_new_instance_type']
-    ec2_current_instance_type = event['queryStringParameters']['ec2_current_instance_type']
     
     maintance_window_utc_timestamp = determine_next_maintenance_window()
     
-    stepfunctions = boto3.client('stepfunctions')
-    
     stepfunction_event = ""
     message = ""
-
-    if action == "approved":
+    
+    if service == 'ebs':
         stepfunction_event = { 
-            "Status": "Approved",
-            "ec2_id": ec2_id,
-            "InstanceArn": instance_arn,
-            "ec2_new_instance_type": ec2_new_instance_type,
-            "ec2_current_instance_type": ec2_current_instance_type,
+            "Status": action,
             "maintenance_window": maintance_window_utc_timestamp
         }
-
+    
+    if service == 'ec2':
+        stepfunction_event = { 
+            "Status": action,
+            "maintenance_window": maintance_window_utc_timestamp
+        }
+    
+    if action == "Approved":
         message = """
         Thank you!
         
         We’ll update the resources with the recommendations!
         """
-    elif action == "rejected":
-        stepfunction_event = { 
-            "Status": "Rejected",
-            "ec2_id": ec2_id,
-            "InstanceArn": instance_arn,
-            "ec2_new_instance_type": ec2_new_instance_type,
-            "ec2_current_instance_type": ec2_current_instance_type,
-            "maintenance_window": maintance_window_utc_timestamp
-        }
+        
+    if action == "Rejected":
         message = """
         The update was canceled.
         
         If the resource continues to be flagged by AWS Compute Optimizer, we will attempt the update again during the next cycle.
         """
-    else:
-        print("Unrecognized action. Expected: approve, reject.")
-        return {
-            "statusCode": 500,
-            "body": json.dumps({"Status": "Failed to process the request. Unrecognized Action."})
-        }
+
 
     try:
         stepfunctions = boto3.client('stepfunctions')

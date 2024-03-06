@@ -25,30 +25,30 @@ def determine_next_maintenance_window():
 def lambda_handler(event, context):
     
     exclude_tag = os.environ['ExcludeTag']
-    email_approval = os.environ['EmailApproval']
+    approval = os.environ['Approval']
     architectural_change = os.environ['ArchitecturalChange']
     risk_profile = ['No Risk', 'Very Low', 'Low', 'Medium', 'High', 'Very High'].index(os.environ['RiskProfile'])
-    ec2_id = event['InstanceArn'].split('/')[1]
+    resource_id = event['InstanceArn'].split('/')[1]
     region = event['InstanceArn'].split(':')[3]
     return_message = {
         "change_option_detected": False,
-        "ec2_id": ec2_id,
-        "InstanceArn": event['InstanceArn'],
-        "ec2_name": event['InstanceName'],
+        "resource_id": resource_id,
+        "resource_arn": event['InstanceArn'],
+        "resource_name": event['InstanceName'],
         "message": "None of the recommendations met the requirements"
     }
     
     maintance_window_utc_timestamp = determine_next_maintenance_window()
 
     ec2 = boto3.resource('ec2')
-    ec2_instance = ec2.Instance(ec2_id)
+    ec2_instance = ec2.Instance(resource_id)
     stop_protection = ec2_instance.describe_attribute(Attribute='disableApiStop')
     if stop_protection['DisableApiStop']['Value'] == True:
         return_message["message"] = "The instance was configured with Stop Protection"
         return return_message
 
     ec2_client = boto3.client('ec2', region_name=region)
-    response = ec2_client.describe_instances(InstanceIds=[ec2_id])
+    response = ec2_client.describe_instances(InstanceIds=[resource_id])
     tags = response['Reservations'][0]['Instances'][0]['Tags']
 
     for tag in tags:
@@ -67,16 +67,6 @@ def lambda_handler(event, context):
     if response['Reservations'][0]['Instances'][0]['Placement']['GroupName'] != '':
         return_message["message"] = "The instance is part of a Placement Group"
         return return_message
-    
-    # # Validate that the instance has CloudWatch Agent installed
-    # cw_agent_installed = False
-    # for utilization_metric in event['UtilizationMetrics']:
-    #     if utilization_metric['Name'] == 'MEMORY':
-    #         cw_agent_installed = True
-    
-    # if not cw_agent_installed:
-    #     return_message["message"] = 'The instance does not have CloudWatch Agent installed'
-    #     return return_message
             
     for recommendation in event['RecommendationOptions']:
         if recommendation['PerformanceRisk'] <= risk_profile and 'SavingsOpportunity' in recommendation:
@@ -91,18 +81,19 @@ def lambda_handler(event, context):
                     continue
                 
                 return {
-                    "change_option_detected": True,
-                    "email_approval": email_approval,
-                    "maintenance_window": maintance_window_utc_timestamp,
-                    "InstanceArn": event['InstanceArn'],
-                    "ec2_id": ec2_id,
-                    "ec2_name": event['InstanceName'],
-                    "ec2_new_instance_type": recommendation['InstanceType'],
-                    "ec2_current_instance_type": event['CurrentInstanceType'],
-                    "migration_effort": recommendation['MigrationEffort'],
-                    "performance_risk": recommendation['PerformanceRisk'],
-                    "savings_opportunity": recommendation['SavingsOpportunity']['EstimatedMonthlySavings']['Value'],
-                    "savings_opportunity_percentage": recommendation['SavingsOpportunity']['SavingsOpportunityPercentage']
-                }
+                  "change_option_detected": True,
+                  "approval": approval,
+                  "maintenance_window": maintance_window_utc_timestamp,
+                  "InstanceArn": event['InstanceArn'],
+                  "resource_id": resource_id,
+                  "resource_arn": event['InstanceArn'],
+                  "resource_name": event['InstanceName'],
+                  "current_resource_type": event['CurrentInstanceType'],
+                  "new_resource_type": recommendation['InstanceType'],
+                  "migration_effort": recommendation['MigrationEffort'],
+                  "performance_risk": recommendation['PerformanceRisk'],
+                  "savings_opportunity": recommendation['SavingsOpportunity']['EstimatedMonthlySavings']['Value'],
+                  "savings_opportunity_percentage": recommendation['SavingsOpportunity']['SavingsOpportunityPercentage']
+              }
             
     return return_message
