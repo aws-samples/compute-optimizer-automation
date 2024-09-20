@@ -4,6 +4,8 @@ def lambda_handler(event, context):
     
     resource_id = event['resource_id']
     current_resource_type = event['current_resource_type']
+    ec2 = boto3.resource('ec2')
+    ec2_instance = ec2.Instance(resource_id)
     
     try:
         if ec2_instance.instance_type != current_resource_type:
