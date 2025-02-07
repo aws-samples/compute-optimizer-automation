@@ -28,41 +28,60 @@ The AWS COA architecture is built around an AWS Step Function, which efficiently
 
 ![architecture](img/architecture.png)
 
+# Supported Automations
+
+AWS COA currently supports the following automation processes:
+
+1. **Resizing overprovisioned EC2 instances** – Automatically adjusts instance types based on AWS Compute Optimizer recommendations to improve efficiency and reduce costs.
+
+2. **Optimizing EBS volumes** – Adjusts EBS volume attributes such as type, IOPS, and throughput to align with usage patterns and cost efficiency.
+
+3. **Deleting unattached idle EBS volumes** – Identifies and removes EBS volumes that are no longer attached to any instance and have been flagged as idle by AWS Compute Optimizer.
+
+
+![Automation Flows](img/automation-flows.png)
+
 # Getting Started
 
 Follow these steps to get started with AWS COA:
 
 1. **Configure AWS Compute Optimizer:** Ensure AWS Compute Optimizer is enabled and configured to analyze your AWS resources.
 
-2. **Set Up AWS COA:** Use AWS CloudFormation to deploy the AWS COA solution. You can deploy the solution using the provided CloudFormation template available at [AWS-Compute-Optimizer-Automation.yml](src/cf-template/AWS-Compute-Optimizer-Automation.yml). This template includes the necessary AWS Step Function, Lambda functions, and optional SNS and API Gateway integration.
+2. **Set Up AWS COA:** Use AWS CloudFormation to deploy the AWS COA solution. You can deploy the solution using the provided CloudFormation template available at [AWS-Compute-Optimizer-Automation.yml](src/cf-template/AWS-Compute-Optimizer-Automation.yml). This template includes the required AWS Step Functions, Lambda functions, and an optional default approval flow that uses SNS and API Gateway.
 
-3. **Define Parameters:** During the CloudFormation deployment, you'll need to specify various parameters that align with your organization's preferences for automatic resource changes. These parameters include:
+    [![Launch Stack](https://cdn.rawgit.com/buildkite/cloudformation-launch-stack-button-svg/master/launch-stack.svg)](https://console.aws.amazon.com/cloudformation/home#/stacks/new?templateURL=https://compute-optimizer-automation.s3.us-east-1.amazonaws.com/cf-template/AWS-Compute-Optimizer-Automation.yml)
 
-    - **AutomateEC2Recommendations:** define whether to automate EC2 recommendations from AWS Compute Optimizer
+3. **Stack name:** Enter a name for the stack to be created.
 
-    - **ArchitecturalChange:** define whether you want to consider changes to the processor.
+4. **Define Parameters:** During the CloudFormation deployment, you'll need to specify various parameters that align with your organization's preferences for automatic resource changes. These parameters include:
 
-    - **EBSSnapshot:** define whether to take a snapshot before upgrading the EC2 instance
+    - **ApprovalRequired:** Specify whether an approval request should be sent before making any changes.
 
-    - **AutomateEBSRecommendations:** define whether to automate EBS recommendations from AWS Compute Optimizer
+    - **ArchitecturalChange:** Indicate whether processor changes should be considered.
 
-    - **DefaultApprovalFlow:** this will launch a sample flow that uses SNS and API Gateway for the approval
+    - **AutomateEBSRecommendations:** Choose whether to automate EBS recommendations from AWS Compute Optimizer.
 
-    - **Email:** email address to receive notifications from AWS COA as part of the default approval flow.
+    - **AutomateEC2Recommendations:** Choose whether to automate EC2 recommendations from AWS Compute Optimizer.
 
-    - **ApprovalRequired:** define whether you want to send an approval request before making any changes.
+    - **AutomateIdleRecommendations:** Specify whether to automate the deletion of EBS volumes identified as idle by AWS Compute Optimizer.
 
-    - **ExcludeTag:** define the tag that identifies the resources you want to exclude from optimization.
+    - **DefaultApprovalFlow:** Launches a sample approval flow using SNS and API Gateway.
 
-    - **MaintenanceWindowDay:** define the day you want to make changes to the resources during the maintenance window.
+    - **EBSSnapshot:** Specify whether to take a snapshot before upgrading an EC2 instance.
 
-    - **MaintenanceWindowTime:** define the time (in UTC) you want to make changes to the resources during the maintenance window.
+    - **Email:** Email address to receive notifications from AWS COA as part of the default approval flow.
 
-    - **RiskProfile:** define the level of risk you are willing to take for automated resource changes.
+    - **ExcludeTag:** Define the tag used to identify resources that should be excluded from optimization.
 
-4. **Resource Optimization:** AWS COA will automatically evaluate the recommendations every other week and apply the relevant recommendations during the designated maintenance window. This ensures that your resources are consistently optimized without manual intervention.
+    - **MaintenanceWindowDay:** Specify the day for making changes to resources during the maintenance window.
 
-5. **Optional User Approval (If Enabled):** If user approval is enabled during the CloudFormation setup, an EventBridge event will be created to approve or reject resource changes before they are implemented. This additional layer of control ensures that you have the final say in resource modifications.
+    - **MaintenanceWindowTime:** Specify the time (UTC) for making changes to resources during the maintenance window.
+
+    - **RiskProfile:** Define the level of risk acceptable for automated resource changes.
+
+5. **Resource Optimization:** AWS COA will automatically evaluate the recommendations every other week and apply the relevant recommendations during the designated maintenance window. This ensures that your resources are consistently optimized without manual intervention.
+
+6. **Optional User Approval (If Enabled):** If user approval is enabled during the CloudFormation setup, an EventBridge event will be created to approve or reject resource changes before they are implemented. This additional layer of control ensures that you have the final say in resource modifications.
 
     * If you are using the 'DefaultApprovalFlow', an EventBridge rule will be configured to capture the event. Subsequently, using SNS and API Gateway, a notification will be sent to request the approval or rejection of the change.
 
@@ -72,7 +91,7 @@ Follow these steps to get started with AWS COA:
 
 While AWS COA is a powerful solution for optimizing EC2 instances and reducing costs, it has certain limitations to consider:
 
-1. **Limited to EC2 Instances and EBS Volumes:** Currently, AWS COA only applies recommendations on EC2 instances and EBS Volumes. We have plans to expand support for other AWS services in future updates.
+1. **Limited to EC2 Instances and EBS Volumes:** Currently, AWS COA applies recommendations only to EC2 instances and EBS volumes, including optimizations for volume type, IOPS, and throughput, as well as the deletion of idle volumes. We plan to expand support for additional AWS services in future updates.
 
 2. **Recommendation Accuracy with CloudWatch Agent:** To ensure accurate recommendations, it is highly recommended to have the CloudWatch agent installed on all your instances. This allows AWS Compute Optimizer to consider memory usage alongside other metrics when generating recommendations.
 

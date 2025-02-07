@@ -91,18 +91,60 @@ def ec2_approval(event):
     """
     return emailMessage, emailSubject
 
+def idle_approval(event):
+    
+    apiGwEndpoint = os.environ.get('ApiGwEndpoint')
+    
+    taskToken = urllib.parse.quote(event['detail']['TaskToken'])
+    
+    resource_id = event['detail']['Payload']['resource_id']
+    resource_arn = event['detail']['Payload']['resource_arn']
+    resource_type = event['detail']['Payload']['resource_type']
+    
+    savings_opportunity = round(event['detail']['Payload']['savings_opportunity'], 2)
+    savings_opportunity_percentage = round(event['detail']['Payload']['savings_opportunity_percentage'])
+    
+    approveEndpoint = f'{apiGwEndpoint}?action=Approved&service=ec2&taskToken={taskToken}'
+    rejectEndpoint = f'{apiGwEndpoint}?action=Rejected&service=ec2&taskToken={taskToken}'
+
+    emailSubject = '[Action Required] AWS COA - Approval for Idle Finding'
+    
+    emailMessage = f"""
+    Hi There,
+
+    We are reaching out because we need your approval to delete the resource "({resource_id})"
+    This resource was flagged as idle by AWS Compute Optimizer, so we plan to take a snapshot and delete it.
+    
+    By making this change, we can reduce AWS costs while ensuring the resource can always be recreated from the snapshot if needed.
+
+            * Resource id: {resource_id}
+            * Savings: {savings_opportunity_percentage}% or ${savings_opportunity} per month
+
+    Approve Change -> {approveEndpoint}
+
+    Reject Change -> {rejectEndpoint}
+
+    Thank you!
+    """
+    return emailMessage, emailSubject
+
 def lambda_handler(event, context):
 
     emailSnsTopic = os.environ.get('SNSTopic')
     
     emailMessage = None
     emailSubject = None
+
+    print(event)
     
     if event['detail-type'] == 'aws-coa-ebs-change-approval':
         emailMessage, emailSubject = ebs_approval(event)
     
     if event['detail-type'] == 'aws-coa-ec2-change-approval':
         emailMessage, emailSubject = ec2_approval(event)
+
+    if event['detail-type'] == 'aws-coa-idle-change-approval':
+        emailMessage, emailSubject = idle_approval(event)
     
     if emailMessage is not None and emailSubject is not None:
         sns = boto3.client('sns')

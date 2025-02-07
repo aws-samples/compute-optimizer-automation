@@ -31,6 +31,11 @@ Parameters:
     Default: 'yes'
     AllowedValues: ['yes', 'no']
     Description: 'Would you like to automatically apply the EBS recommendations from AWS Compute Optimizer?'
+  AutomateIdleRecommendations:
+    Type: String
+    Default: 'yes'
+    AllowedValues: ['yes', 'no']
+    Description: 'Would you like to automatically delete the unattached EBS that are detected as idle by AWS Compute Optimizer?'
   DefaultApprovalFlow:
     Type: String
     Default: 'yes'
@@ -55,10 +60,6 @@ Parameters:
     Type: String
     Default: 'Exclude-compute-optimizer-automation'
     Description: 'Tag key that identifies the resources that will be excluded'
-  ConcurrencyLimit:
-    Type: Number
-    Default: 40
-    Description: 'Enter the concurrency limit for the Lambda functions (default is 40). For large environments, it is recommended to define a larger number'
 
 Conditions:
   ShouldDeployDefaultApprovalFlowResources:
@@ -104,13 +105,13 @@ Resources:
       Role: !GetAtt 'LambdaAuthorizerRole.Arn'
       MemorySize: 128
       Timeout: 60
-      ReservedConcurrentExecutions: !Ref ConcurrencyLimit
       Code:
         ZipFile: |
           import json
           import boto3
 
           def lambda_handler(event, context):
+              print(event)
               queryStringParameters = event['queryStringParameters']
               
               if 'taskToken' in queryStringParameters:
@@ -178,6 +179,7 @@ Resources:
                 Resource:
                   - !Ref StepFunctionEC2Recommendation
                   - !Ref StepFunctionEBSRecommendation
+                  - !Ref StepFunctionIdleRecommendation
 
   AuthorizerLambdaInvoke:
     Type: AWS::Lambda::Permission
@@ -233,7 +235,6 @@ Resources:
       Role: !GetAtt 'LambdaApiGWApprovalRole.Arn'
       MemorySize: 128
       Timeout: 60
-      ReservedConcurrentExecutions: !Ref ConcurrencyLimit
       Environment:
         Variables:
           MaintenanceWindowDay: !Ref MaintenanceWindowDay
@@ -265,6 +266,7 @@ Resources:
               return maintance_window_utc_timestamp
 
           def lambda_handler(event, context):
+              print(event)
               action = event['queryStringParameters']['action']
               service = event['queryStringParameters']['service']
               task_token = event['queryStringParameters']['taskToken']
@@ -358,6 +360,7 @@ Resources:
                 Resource: 
                   - !Ref StepFunctionEC2Recommendation
                   - !Ref StepFunctionEBSRecommendation
+                  - !Ref StepFunctionIdleRecommendation
 
   # Lambda that send the email for approval
 
@@ -372,7 +375,6 @@ Resources:
       Role: !GetAtt 'LambdaSendEmailApprovalRole.Arn'
       MemorySize: 128
       Timeout: 60
-      ReservedConcurrentExecutions: !Ref ConcurrencyLimit
       Environment:
         Variables:
           SNSTopic: !Ref SNSTopic
@@ -472,18 +474,60 @@ Resources:
               """
               return emailMessage, emailSubject
 
+          def idle_approval(event):
+              
+              apiGwEndpoint = os.environ.get('ApiGwEndpoint')
+              
+              taskToken = urllib.parse.quote(event['detail']['TaskToken'])
+              
+              resource_id = event['detail']['Payload']['resource_id']
+              resource_arn = event['detail']['Payload']['resource_arn']
+              resource_type = event['detail']['Payload']['resource_type']
+              
+              savings_opportunity = round(event['detail']['Payload']['savings_opportunity'], 2)
+              savings_opportunity_percentage = round(event['detail']['Payload']['savings_opportunity_percentage'])
+              
+              approveEndpoint = f'{apiGwEndpoint}?action=Approved&service=ec2&taskToken={taskToken}'
+              rejectEndpoint = f'{apiGwEndpoint}?action=Rejected&service=ec2&taskToken={taskToken}'
+
+              emailSubject = '[Action Required] AWS COA - Approval for Idle Finding'
+              
+              emailMessage = f"""
+              Hi There,
+
+              We are reaching out because we need your approval to delete the resource "({resource_id})"
+              This resource was flagged as idle by AWS Compute Optimizer, so we plan to take a snapshot and delete it.
+              
+              By making this change, we can reduce AWS costs while ensuring the resource can always be recreated from the snapshot if needed.
+
+                      * Resource id: {resource_id}
+                      * Savings: {savings_opportunity_percentage}% or ${savings_opportunity} per month
+
+              Approve Change -> {approveEndpoint}
+
+              Reject Change -> {rejectEndpoint}
+
+              Thank you!
+              """
+              return emailMessage, emailSubject
+
           def lambda_handler(event, context):
 
               emailSnsTopic = os.environ.get('SNSTopic')
               
               emailMessage = None
               emailSubject = None
+
+              print(event)
               
               if event['detail-type'] == 'aws-coa-ebs-change-approval':
                   emailMessage, emailSubject = ebs_approval(event)
               
               if event['detail-type'] == 'aws-coa-ec2-change-approval':
                   emailMessage, emailSubject = ec2_approval(event)
+
+              if event['detail-type'] == 'aws-coa-idle-change-approval':
+                  emailMessage, emailSubject = idle_approval(event)
               
               if emailMessage is not None and emailSubject is not None:
                   sns = boto3.client('sns')
@@ -571,6 +615,424 @@ Resources:
 
   # END - Default Default Approval Flow
 
+  # START - Idle recommendations
+  # Lambda that validates Idle recommendation
+
+  LambdaValidateIdleRecommendationFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: 'AWS COA - Lambda Function that validates the Idle recommendations fro AWS Compute Optimizer'
+      FunctionName: !Sub ${AWS::StackName}-COA-Idle-validate-recommendation
+      Handler: index.lambda_handler
+      Runtime: python3.12
+      Role: !GetAtt 'LambdaValidateIdleRecommendationRole.Arn'
+      MemorySize: 128
+      Timeout: 60
+      Environment:
+        Variables:
+          MaintenanceWindowDay: !Ref MaintenanceWindowDay
+          MaintenanceWindowTime: !Ref MaintenanceWindowTime
+          ExcludeTag: !Ref ExcludeTag
+          Approval: !Ref ApprovalRequired
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+          from datetime import datetime, timedelta
+
+          def determine_next_maintenance_window():
+              maintenance_window_day = os.environ['MaintenanceWindowDay']
+              maintenance_window_time = os.environ['MaintenanceWindowTime']
+
+              # Determine the next maintance window
+              hour = datetime.strptime(maintenance_window_time, "%H:%M").time()
+              weekdays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+              weekday = weekdays.index(maintenance_window_day)
+              now = datetime.utcnow()
+              days_until_maintance_window = (7 + weekday - now.weekday()) % 7
+              if days_until_maintance_window == 0 and now.time() > hour:
+                  days_until_maintance_window = 7
+                  
+              time_until_maintance_window = timedelta(days=days_until_maintance_window)
+              next_maintance_window = now + time_until_maintance_window
+              next_maintance_window = next_maintance_window.replace(hour=hour.hour, minute=hour.minute, second=0, microsecond=0)
+              maintance_window_utc_timestamp = next_maintance_window.strftime("%Y-%m-%dT%H:%M:%SZ")
+              
+              return maintance_window_utc_timestamp
+
+          def lambda_handler(event, context):
+              exclude_tag = os.environ['ExcludeTag']
+              resource_id = event['ResourceId']
+
+              maintance_window_utc_timestamp = determine_next_maintenance_window()
+              
+              ec2 = boto3.client('ec2')
+              response = ec2.describe_volumes(VolumeIds=[resource_id])
+              volume = response['Volumes'][0]
+              
+              if 'Tags' in volume:
+                  tags = volume['Tags']
+                  for tag in tags:
+                      if tag['Key'] == exclude_tag:
+                          return {
+                              "change_option_detected": False,
+                              "resource_id": resource_id,
+                              "resource_arn": event['ResourceArn'],
+                              "message": "This resource is excluded from the Compute Optimization automation (due to the tag)"
+                          }
+              
+              return {
+                  "change_option_detected": True,
+                  "approval": os.environ['Approval'],
+                  "maintenance_window": maintance_window_utc_timestamp,
+                  "resource_arn": event['ResourceArn'],
+                  "resource_id": resource_id,
+                  "resource_type": event['ResourceType'],
+                  "savings_opportunity": event['SavingsOpportunityAfterDiscounts']['EstimatedMonthlySavings']['Value'],
+                  "savings_opportunity_percentage": event['SavingsOpportunityAfterDiscounts']['SavingsOpportunityPercentage']
+              }
+
+  LambdaValidateIdleRecommendationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Action:
+              - 'sts:AssumeRole'
+            Effect: 'Allow'
+            Principal:
+              Service:
+                - 'lambda.amazonaws.com'
+      Policies:
+        - PolicyName: RolePolicy 
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: 
+                  - !Sub 'arn:${AWS::Partition}:logs:*:*:*' 
+              - Effect: Allow
+                Action:
+                  - 'ec2:DescribeVolumes'
+                Resource: '*' 
+
+  # Lambda that update the idle resources
+
+  LambdaUpdateIdleResourceFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: 'AWS COA - Lambda Function that updates the Idle resources'
+      FunctionName: !Sub ${AWS::StackName}-COA-Idle-update-resource
+      Handler: index.lambda_handler
+      Runtime: python3.12
+      Role: !GetAtt 'LambdaUpdateIdleResourceRole.Arn'
+      MemorySize: 128
+      Timeout: 900
+      Code:
+        ZipFile: |
+          import boto3
+
+          def lambda_handler(event, context):
+              resource_id = event['resource_id']
+
+              message = "Failed to update the instance. Please validate the Logs"
+              update_successfully = False
+
+              ec2 = boto3.resource('ec2')
+              volume = ec2.Volume(resource_id)
+
+              try:
+                  # Create a snapshot before deleting
+                  snapshot = volume.create_snapshot()
+                  snapshot.create_tags(Tags=[{"Key": "created-by", "Value": "compute-optimizer-automation"}])
+                  # snapshot.wait_until_completed()
+
+                  # Validate that the volume is not attached to an instance and delete it 
+                  if len(volume.attachments) == 0:
+                      volume.delete()
+                      print(f"The EBS volume {resource_id} was marked for deletion, and the Snapshot {snapshot.id} was created before deleting it") 
+                  
+                  return {
+                      "update_successfully": True,
+                      "resource_arn": event['resource_arn'],
+                      "resource_id": resource_id,
+                      "message": f"The EBS volume {resource_id} was successfully deleted and the Snapshot {snapshot.id} was created before deleting it"
+                  }
+                  
+              except Exception as e:
+                  print(f"Error: {str(e)}")
+                  return {
+                      "update_successfully": False,
+                      "resource_arn": event['resource_arn'],
+                      "resource_id": resource_id,
+                      "message": f"Failed to delete the volume with the following exception: {str(e)}"
+                  }
+
+  LambdaUpdateIdleResourceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Action:
+              - 'sts:AssumeRole'
+            Effect: 'Allow'
+            Principal:
+              Service:
+                - 'lambda.amazonaws.com'
+      Policies:
+        - PolicyName: RolePolicy 
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: 
+                  - !Sub 'arn:${AWS::Partition}:logs:*:*:*' 
+              - Effect: Allow
+                Action:
+                  - 'ec2:DetachVolume'
+                  - 'ec2:DeleteVolume'
+                  - 'ec2:CreateTags'
+                  - 'ec2:CreateSnapshot'
+                  - 'ec2:DescribeVolume'
+                Resource: '*' 
+
+  # Idle Step Function
+
+  StepFunctionIdleRecommendation:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub ${AWS::StackName}-COA-Idle-StepFunction
+      StateMachineType: STANDARD
+      RoleArn: !GetAtt StepFunctionIdleRecommendationRole.Arn
+      DefinitionString:
+        Fn::Sub: |
+          {
+            "Comment": "A description of my state machine",
+            "StartAt": "GetIdleRecommendations",
+            "States": {
+              "GetIdleRecommendations": {
+                "Type": "Task",
+                "Parameters": {},
+                "Resource": "arn:aws:states:::aws-sdk:computeoptimizer:getIdleRecommendations",
+                "Next": "Iterate Recommendations"
+              },
+              "Iterate Recommendations": {
+                "Type": "Map",
+                "ItemProcessor": {
+                  "ProcessorConfig": {
+                    "Mode": "DISTRIBUTED",
+                    "ExecutionType": "STANDARD"
+                  },
+                  "StartAt": "is Unattached Choice",
+                  "States": {
+                    "is Unattached Choice": {
+                      "Type": "Choice",
+                      "Choices": [
+                        {
+                          "Variable": "$.Finding",
+                          "StringEquals": "Unattached",
+                          "Next": "validate EBS volume"
+                        }
+                      ],
+                      "Default": "Not Unattached EBS Finding"
+                    },
+                    "validate EBS volume": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::lambda:invoke",
+                      "OutputPath": "$.Payload",
+                      "Parameters": {
+                        "Payload.$": "$",
+                        "FunctionName": "${LambdaValidateIdleRecommendationFunction.Arn}"
+                      },
+                      "Retry": [
+                        {
+                          "ErrorEquals": [
+                            "Lambda.ServiceException",
+                            "Lambda.AWSLambdaException",
+                            "Lambda.SdkClientException",
+                            "Lambda.TooManyRequestsException"
+                          ],
+                          "IntervalSeconds": 1,
+                          "MaxAttempts": 3,
+                          "BackoffRate": 2,
+                          "JitterStrategy": "FULL"
+                        }
+                      ],
+                      "Next": "Change option detected"
+                    },
+                    "Change option detected": {
+                      "Type": "Choice",
+                      "Choices": [
+                        {
+                          "Variable": "$.change_option_detected",
+                          "BooleanEquals": true,
+                          "Next": "Approval Needed"
+                        }
+                      ],
+                      "Default": "No change needs to be done"
+                    },
+                    "Approval Needed": {
+                      "Type": "Choice",
+                      "Choices": [
+                        {
+                          "Variable": "$.approval",
+                          "StringEquals": "yes",
+                          "Next": "Send Approval Event"
+                        }
+                      ],
+                      "Default": "Wait for MW"
+                    },
+                    "Wait for MW": {
+                      "Type": "Wait",
+                      "Next": "Delete Idle resources",
+                      "TimestampPath": "$.maintenance_window"
+                    },
+                    "Delete Idle resources": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::lambda:invoke",
+                      "OutputPath": "$.Payload",
+                      "Parameters": {
+                        "Payload.$": "$",
+                        "FunctionName": "${LambdaUpdateIdleResourceFunction.Arn}"
+                      },
+                      "Retry": [
+                        {
+                          "ErrorEquals": [
+                            "Lambda.ServiceException",
+                            "Lambda.AWSLambdaException",
+                            "Lambda.SdkClientException",
+                            "Lambda.TooManyRequestsException"
+                          ],
+                          "IntervalSeconds": 1,
+                          "MaxAttempts": 3,
+                          "BackoffRate": 2,
+                          "JitterStrategy": "FULL"
+                        }
+                      ],
+                      "End": true
+                    },
+                    "Send Approval Event": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::events:putEvents.waitForTaskToken",
+                      "Parameters": {
+                        "Entries": [
+                          {
+                            "Detail": {
+                              "Payload.$": "$",
+                              "TaskToken.$": "$$.Task.Token"
+                            },
+                            "DetailType": "aws-coa-idle-change-approval",
+                            "EventBusName": "demo-COA-EventBridge-bus",
+                            "Source": "aws-coa-approval"
+                          }
+                        ]
+                      },
+                      "Next": "Approval Choice",
+                      "ResultPath": "$.approvalStatus",
+                      "Catch": [
+                        {
+                          "ErrorEquals": [
+                            "States.Timeout"
+                          ],
+                          "Comment": "72 hours timeout",
+                          "Next": "Change Rejected"
+                        }
+                      ],
+                      "TimeoutSeconds": 259202,
+                      "HeartbeatSeconds": 259200
+                    },
+                    "Approval Choice": {
+                      "Type": "Choice",
+                      "Choices": [
+                        {
+                          "Variable": "$.approvalStatus.Status",
+                          "StringEquals": "Approved",
+                          "Next": "Wait for MW"
+                        }
+                      ],
+                      "Default": "Change Rejected"
+                    },
+                    "Change Rejected": {
+                      "Type": "Pass",
+                      "End": true,
+                      "QueryLanguage": "JSONata",
+                      "Output": {
+                        "resource_id": "{% $states.input.resource_id %}",
+                        "resource_arn": "{% $states.input.resource_arn %}",
+                        "message": "The change was rejected"
+                      }
+                    },
+                    "No change needs to be done": {
+                      "Type": "Pass",
+                      "End": true
+                    },
+                    "Not Unattached EBS Finding": {
+                      "Type": "Pass",
+                      "End": true,
+                      "QueryLanguage": "JSONata",
+                      "Output": {
+                        "resource_id": "{% $states.input.ResourceId %}",
+                        "resource_arn": "{% $states.input.ResourceArn %}",
+                        "message": "The finding is not related to an unattached EBS volume"
+                      }
+                    }
+                  }
+                },
+                "End": true,
+                "ItemsPath": "$.IdleRecommendations",
+                "Label": "IterateRecommendations",
+                "MaxConcurrency": 1000
+              }
+            }
+          }
+  
+  StepFunctionIdleRecommendationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: RolePolicy
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'states:StartExecution'
+                Resource: 
+                  - !Sub 'arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${AWS::StackName}-COA-Idle-StepFunction'
+              - Effect: Allow
+                Action:
+                  - 'events:PutEvents'
+                Resource: 
+                  - !GetAtt EventBridgeBus.Arn
+              - Effect: Allow
+                Action:
+                  - 'lambda:InvokeFunction'
+                Resource:
+                  - !GetAtt LambdaValidateIdleRecommendationFunction.Arn
+                  - !GetAtt LambdaUpdateIdleResourceFunction.Arn
+              - Effect: Allow
+                Action:
+                  - 'compute-optimizer:GetIdleRecommendations'
+                Resource: '*'
+  
+  # END - Idle recommendations
+
   # START - EBS recommendations
   # EBS Lambda that validates recommendation
 
@@ -584,7 +1046,6 @@ Resources:
       Role: !GetAtt 'LambdaValidateEBSRecommendationRole.Arn'
       MemorySize: 128
       Timeout: 60
-      ReservedConcurrentExecutions: !Ref ConcurrencyLimit
       Environment:
         Variables:
           MaintenanceWindowDay: !Ref MaintenanceWindowDay
@@ -644,7 +1105,7 @@ Resources:
                   tags = volume['Tags']
                   for tag in tags:
                       if tag['Key'] == exclude_tag:
-                          return_message["message"] = "The instance is excluded from the Compute Optimization automate recommendations (due to the tag)"
+                          return_message["message"] = "The instance is excluded from the Compute Optimization automation (due to the tag)"
                           return return_message
               
               for recommendation in event['VolumeRecommendationOptions']:
@@ -710,7 +1171,6 @@ Resources:
       Role: !GetAtt 'LambdaUpdateEBSResourceRole.Arn'
       MemorySize: 128
       Timeout: 900
-      ReservedConcurrentExecutions: !Ref ConcurrencyLimit
       Code:
         ZipFile: |
           import boto3
@@ -976,8 +1436,7 @@ Resources:
                 },
                 "End": true,
                 "ItemsPath": "$.VolumeRecommendations",
-                "Label": "IterateRecommendations",
-                "MaxConcurrency": ${ConcurrencyLimit}
+                "Label": "IterateRecommendations"
               }
             }
           }
@@ -1033,7 +1492,6 @@ Resources:
       Role: !GetAtt 'LambdaValidateEC2RecommendationRole.Arn'
       MemorySize: 128
       Timeout: 60
-      ReservedConcurrentExecutions: !Ref ConcurrencyLimit
       Environment:
         Variables:
           MaintenanceWindowDay: !Ref MaintenanceWindowDay
@@ -1099,7 +1557,7 @@ Resources:
 
               for tag in tags:
                   if tag['Key'] == exclude_tag:
-                      return_message["message"] = "The instance is excluded from the Compute Optimization automate recommendations (due to the tag)"
+                      return_message["message"] = "The instance is excluded from the Compute Optimization automation (due to the tag)"
                       return return_message
                       
                   if tag['Key'] == 'aws:autoscaling:groupName':
@@ -1185,7 +1643,6 @@ Resources:
       Role: !GetAtt 'LambdaUpdateEC2ResourceRole.Arn'
       MemorySize: 128
       Timeout: 900
-      ReservedConcurrentExecutions: !Ref ConcurrencyLimit
       Environment:
         Variables:
           EBSSnapshot: !Ref EBSSnapshot
@@ -1299,7 +1756,6 @@ Resources:
       Role: !GetAtt 'LambdaEC2RollbackRole.Arn'
       MemorySize: 128
       Timeout: 900
-      ReservedConcurrentExecutions: !Ref ConcurrencyLimit
       Code:
         ZipFile: |
           import boto3
@@ -1600,8 +2056,7 @@ Resources:
                 },
                 "End": true,
                 "ItemsPath": "$.InstanceRecommendations",
-                "Label": "IterateRecommendations",
-                "MaxConcurrency": ${ConcurrencyLimit}
+                "Label": "IterateRecommendations"
               }
             }
           }
@@ -1689,7 +2144,28 @@ Resources:
                     "Next": "EBS StepFunction"
                   }
                 ],
+                "Default": "AutomateIdleRecommendations"
+              },
+              "AutomateIdleRecommendations": {
+                "Type": "Choice",
+                "Choices": [
+                  {
+                    "Variable": "$.AutomateIdleRecommendations",
+                    "StringEquals": "yes",
+                    "Next": "Idle StepFunction"
+                  }
+                ],
                 "Default": "Pass"
+              },
+              "Idle StepFunction": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::states:startExecution",
+                "Parameters": {
+                  "StateMachineArn": "${StepFunctionIdleRecommendation.Arn}",
+                  "Input": {}
+                },
+                "End": true,
+                "ResultPath": null
               },
               "Pass": {
                 "Type": "Pass",
@@ -1702,8 +2178,8 @@ Resources:
                   "StateMachineArn": "${StepFunctionEBSRecommendation.Arn}",
                   "Input": {}
                 },
-                "End": true,
-                "ResultPath": null
+                "ResultPath": null,
+                "Next": "AutomateIdleRecommendations"
               }
             }
           }
@@ -1730,6 +2206,7 @@ Resources:
                 Resource: 
                   - !Ref StepFunctionEC2Recommendation
                   - !Ref StepFunctionEBSRecommendation
+                  - !Ref StepFunctionIdleRecommendation
               - Effect: Allow
                 Action:
                   - 'events:PutTargets'
@@ -1756,7 +2233,8 @@ Resources:
           Fn::Sub: |
             {
               "AutomateEC2Recommendations": "${AutomateEC2Recommendations}", 
-              "AutomateEBSRecommendations": "${AutomateEBSRecommendations}"
+              "AutomateEBSRecommendations": "${AutomateEBSRecommendations}",
+              "AutomateIdleRecommendations": "${AutomateIdleRecommendations}"
             }
   
   EventBridgeScheduleThirdMonday:
@@ -1778,7 +2256,8 @@ Resources:
           Fn::Sub: |
             {
               "AutomateEC2Recommendations": "${AutomateEC2Recommendations}", 
-              "AutomateEBSRecommendations": "${AutomateEBSRecommendations}"
+              "AutomateEBSRecommendations": "${AutomateEBSRecommendations}",
+              "AutomateIdleRecommendations": "${AutomateIdleRecommendations}"
             }
 
   EventBridgeScheduleRole:
