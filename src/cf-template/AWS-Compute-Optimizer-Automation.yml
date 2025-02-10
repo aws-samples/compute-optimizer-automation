@@ -822,7 +822,16 @@ Resources:
             "States": {
               "GetIdleRecommendations": {
                 "Type": "Task",
-                "Parameters": {},
+                "Parameters": {
+                  "Filters": [
+                    {
+                      "Name": "Finding",
+                      "Values": [
+                        "Unattached"
+                      ]
+                    }
+                  ]
+                },
                 "Resource": "arn:aws:states:::aws-sdk:computeoptimizer:getIdleRecommendations",
                 "Next": "Iterate Recommendations"
               },
@@ -1268,7 +1277,16 @@ Resources:
             "States": {
               "GetEBSVolumeRecommendations": {
                 "Type": "Task",
-                "Parameters": {},
+                "Parameters": {
+                  "Filters": [
+                    {
+                      "Name": "Finding",
+                      "Values": [
+                        "NotOptimized"
+                      ]
+                    }
+                  ]
+                },
                 "Resource": "arn:aws:states:::aws-sdk:computeoptimizer:getEBSVolumeRecommendations",
                 "Next": "Iterate Recommendations"
               },
@@ -1835,7 +1853,17 @@ Resources:
             "States": {
               "GetEC2InstanceRecommendations": {
                 "Type": "Task",
-                "Parameters": {},
+                "Parameters": {
+                  "Filters": [ 
+                    { 
+                        "Name": "Finding",
+                        "Values": [ "OVER_PROVISIONED" ]
+                    }
+                  ],
+                  "RecommendationPreferences": { 
+                    "CpuVendorArchitectures": [ "CURRENT" ]
+                  }
+                },
                 "Resource": "arn:aws:states:::aws-sdk:computeoptimizer:getEC2InstanceRecommendations",
                 "Next": "Iterate Recommendations"
               },
