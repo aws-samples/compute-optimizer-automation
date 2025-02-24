@@ -941,7 +941,7 @@ Resources:
                               "TaskToken.$": "$$.Task.Token"
                             },
                             "DetailType": "aws-coa-idle-change-approval",
-                            "EventBusName": "demo-COA-EventBridge-bus",
+                            "EventBusName": "${EventBridgeBus}",
                             "Source": "aws-coa-approval"
                           }
                         ]
