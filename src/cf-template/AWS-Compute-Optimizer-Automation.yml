@@ -721,91 +721,6 @@ Resources:
                   - 'ec2:DescribeVolumes'
                 Resource: '*' 
 
-  # Lambda that update the idle resources
-
-  LambdaUpdateIdleResourceFunction:
-    Type: AWS::Lambda::Function
-    Properties:
-      Description: 'AWS COA - Lambda Function that updates the Idle resources'
-      FunctionName: !Sub ${AWS::StackName}-COA-Idle-update-resource
-      Handler: index.lambda_handler
-      Runtime: python3.12
-      Role: !GetAtt 'LambdaUpdateIdleResourceRole.Arn'
-      MemorySize: 128
-      Timeout: 900
-      Code:
-        ZipFile: |
-          import boto3
-
-          def lambda_handler(event, context):
-              resource_id = event['resource_id']
-
-              message = "Failed to update the instance. Please validate the Logs"
-              update_successfully = False
-
-              ec2 = boto3.resource('ec2')
-              volume = ec2.Volume(resource_id)
-
-              try:
-                  # Create a snapshot before deleting
-                  snapshot = volume.create_snapshot()
-                  snapshot.create_tags(Tags=[{"Key": "created-by", "Value": "compute-optimizer-automation"}])
-                  # snapshot.wait_until_completed()
-
-                  # Validate that the volume is not attached to an instance and delete it 
-                  if len(volume.attachments) == 0:
-                      volume.delete()
-                      print(f"The EBS volume {resource_id} was marked for deletion, and the Snapshot {snapshot.id} was created before deleting it") 
-                  
-                  return {
-                      "update_successfully": True,
-                      "resource_arn": event['resource_arn'],
-                      "resource_id": resource_id,
-                      "message": f"The EBS volume {resource_id} was successfully deleted and the Snapshot {snapshot.id} was created before deleting it"
-                  }
-                  
-              except Exception as e:
-                  print(f"Error: {str(e)}")
-                  return {
-                      "update_successfully": False,
-                      "resource_arn": event['resource_arn'],
-                      "resource_id": resource_id,
-                      "message": f"Failed to delete the volume with the following exception: {str(e)}"
-                  }
-
-  LambdaUpdateIdleResourceRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Action:
-              - 'sts:AssumeRole'
-            Effect: 'Allow'
-            Principal:
-              Service:
-                - 'lambda.amazonaws.com'
-      Policies:
-        - PolicyName: RolePolicy 
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action:
-                  - logs:CreateLogGroup
-                  - logs:CreateLogStream
-                  - logs:PutLogEvents
-                Resource: 
-                  - !Sub 'arn:${AWS::Partition}:logs:*:*:*' 
-              - Effect: Allow
-                Action:
-                  - 'ec2:DetachVolume'
-                  - 'ec2:DeleteVolume'
-                  - 'ec2:CreateTags'
-                  - 'ec2:CreateSnapshot'
-                  - 'ec2:DescribeVolume'
-                Resource: '*' 
-
   # Idle Step Function
 
   StepFunctionIdleRecommendation:
@@ -817,7 +732,7 @@ Resources:
       DefinitionString:
         Fn::Sub: |
           {
-            "Comment": "A description of my state machine",
+            "Comment": "Idle EBS Recommendarions. This state machine, gets the approval and automatically applies the recommendations from AWS Compute Optimizer",
             "StartAt": "GetIdleRecommendations",
             "States": {
               "GetIdleRecommendations": {
@@ -903,32 +818,80 @@ Resources:
                     },
                     "Wait for MW": {
                       "Type": "Wait",
-                      "Next": "Delete Idle resources",
+                      "Next": "Create Snapshot",
                       "TimestampPath": "$.maintenance_window"
                     },
-                    "Delete Idle resources": {
+                    "Create Snapshot": {
                       "Type": "Task",
-                      "Resource": "arn:aws:states:::lambda:invoke",
-                      "OutputPath": "$.Payload",
-                      "Parameters": {
-                        "Payload.$": "$",
-                        "FunctionName": "${LambdaUpdateIdleResourceFunction.Arn}"
+                      "Resource": "arn:aws:states:::aws-sdk:ec2:createSnapshot",
+                      "Next": "Tag the Snapshot",
+                      "QueryLanguage": "JSONata",
+                      "Arguments": {
+                        "VolumeId": "{% $states.input.resource_id  %}"
                       },
-                      "Retry": [
+                      "Output": "{%\n    $merge([$states.input, {\n      \"snapshot_id\": $states.result.SnapshotId\n    }])\n%}"
+                    },
+                    "Tag the Snapshot": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::aws-sdk:ec2:createTags",
+                      "Next": "Describe Snapshots",
+                      "QueryLanguage": "JSONata",
+                      "Arguments": {
+                        "Resources": [
+                          "{% $states.input.snapshot_id  %}"
+                        ],
+                        "Tags": [
+                          {
+                            "Key": "created-by",
+                            "Value": "compute-optimizer-automation"
+                          }
+                        ]
+                      },
+                      "Output": "{%\n  $states.input\n%}"
+                    },
+                    "Describe Snapshots": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::aws-sdk:ec2:describeSnapshots",
+                      "Next": "Snapshot State",
+                      "QueryLanguage": "JSONata",
+                      "Arguments": {
+                        "SnapshotIds": [
+                          "{% $states.input.snapshot_id  %}"
+                        ]
+                      },
+                      "Output": "{%\n    $merge([$states.input, {\n      \"snapshot_state\": $states.result.Snapshots[0].State,\n      \"snapshot_progress\": $states.result.Snapshots[0].Progress\n    }])\n%}"
+                    },
+                    "Snapshot State": {
+                      "Type": "Choice",
+                      "Choices": [
                         {
-                          "ErrorEquals": [
-                            "Lambda.ServiceException",
-                            "Lambda.AWSLambdaException",
-                            "Lambda.SdkClientException",
-                            "Lambda.TooManyRequestsException"
-                          ],
-                          "IntervalSeconds": 1,
-                          "MaxAttempts": 3,
-                          "BackoffRate": 2,
-                          "JitterStrategy": "FULL"
+                          "Variable": "$.snapshot_state",
+                          "StringEquals": "pending",
+                          "Next": "Wait for Snapshot to complet"
                         }
                       ],
-                      "End": true
+                      "Default": "Delete Idle Volume"
+                    },
+                    "Delete Idle Volume": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::aws-sdk:ec2:deleteVolume",
+                      "End": true,
+                      "QueryLanguage": "JSONata",
+                      "Arguments": {
+                        "VolumeId": "{% $states.input.resource_id  %}"
+                      },
+                      "Output": {
+                        "resource_id": "{% $states.input.resource_id %}",
+                        "resource_arn": "{% $states.input.resource_arn %}",
+                        "snapshot_id": "{% $states.input.snapshot_id %}",
+                        "savings": "{% $states.input.savings_opportunity %}",
+                        "message": "The EBS volume was marked for deletion, and a Snapshot was created before deleting it"
+                      }
+                    },
+                    "Wait for Snapshot to complet": {
+                      "Type": "Wait",
+                      "Seconds": 300,
+                      "Next": "Describe Snapshots"
                     },
                     "Send Approval Event": {
                       "Type": "Task",
@@ -999,8 +962,7 @@ Resources:
                 },
                 "End": true,
                 "ItemsPath": "$.IdleRecommendations",
-                "Label": "IterateRecommendations",
-                "MaxConcurrency": 1000
+                "Label": "IterateRecommendations"
               }
             }
           }
@@ -1034,10 +996,13 @@ Resources:
                   - 'lambda:InvokeFunction'
                 Resource:
                   - !GetAtt LambdaValidateIdleRecommendationFunction.Arn
-                  - !GetAtt LambdaUpdateIdleResourceFunction.Arn
               - Effect: Allow
                 Action:
                   - 'compute-optimizer:GetIdleRecommendations'
+                  - 'ec2:DeleteVolume'
+                  - 'ec2:CreateTags'
+                  - 'ec2:CreateSnapshot'
+                  - 'ec2:DescribeSnapshots'
                 Resource: '*'
   
   # END - Idle recommendations
@@ -1272,7 +1237,7 @@ Resources:
       DefinitionString:
         Fn::Sub: |
           {
-            "Comment": "A description of my state machine",
+            "Comment": "EBS Recommendarions. This state machine, gets the approval and automatically applies the recommendations from AWS Compute Optimizer",
             "StartAt": "GetEBSVolumeRecommendations",
             "States": {
               "GetEBSVolumeRecommendations": {
