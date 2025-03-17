@@ -1517,11 +1517,15 @@ Resources:
               risk_profile = ['No Risk', 'Very Low', 'Low', 'Medium', 'High', 'Very High'].index(os.environ['RiskProfile'])
               resource_id = event['InstanceArn'].split('/')[1]
               region = event['InstanceArn'].split(':')[3]
+              instance_name = 'NA'
+              if 'InstanceName' in event:
+                  instance_name = event['InstanceName']
+
               return_message = {
                   "change_option_detected": False,
                   "resource_id": resource_id,
                   "resource_arn": event['InstanceArn'],
-                  "resource_name": event['InstanceName'],
+                  "resource_name": instance_name,
                   "message": "None of the recommendations met the requirements"
               }
               
@@ -1536,16 +1540,18 @@ Resources:
 
               ec2_client = boto3.client('ec2', region_name=region)
               response = ec2_client.describe_instances(InstanceIds=[resource_id])
-              tags = response['Reservations'][0]['Instances'][0]['Tags']
 
-              for tag in tags:
-                  if tag['Key'] == exclude_tag:
-                      return_message["message"] = "The instance is excluded from the Compute Optimization automation (due to the tag)"
-                      return return_message
-                      
-                  if tag['Key'] == 'aws:autoscaling:groupName':
-                      return_message["message"] = "The instance is part of an ASG"
-                      return return_message
+              if 'Tags' in response['Reservations'][0]['Instances'][0]:
+                  tags = response['Reservations'][0]['Instances'][0]['Tags']
+
+                  for tag in tags:
+                      if tag['Key'] == exclude_tag:
+                          return_message["message"] = "The instance is excluded from the Compute Optimization automation (due to the tag)"
+                          return return_message
+                          
+                      if tag['Key'] == 'aws:autoscaling:groupName':
+                          return_message["message"] = "The instance is part of an ASG"
+                          return return_message
               
               if response['Reservations'][0]['Instances'][0]['CapacityReservationSpecification']['CapacityReservationPreference'] != 'open':
                   return_message["message"] = "The instance is part of an ODCR"
@@ -1574,7 +1580,7 @@ Resources:
                             "InstanceArn": event['InstanceArn'],
                             "resource_id": resource_id,
                             "resource_arn": event['InstanceArn'],
-                            "resource_name": event['InstanceName'],
+                            "resource_name": instance_name,
                             "current_resource_type": event['CurrentInstanceType'],
                             "new_resource_type": recommendation['InstanceType'],
                             "migration_effort": recommendation['MigrationEffort'],
