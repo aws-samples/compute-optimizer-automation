@@ -615,6 +615,193 @@ Resources:
 
   # END - Default Default Approval Flow
 
+  # Lambda that gets the ACO recommendations
+
+  LambdaGetRecommendationsFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: 'AWS COA - Lambda Function that gets and filters the recommendations fro AWS Compute Optimizer'
+      FunctionName: !Sub ${AWS::StackName}-COA-get-recommendations
+      Handler: index.lambda_handler
+      Runtime: python3.13
+      Role: !GetAtt 'LambdaGetRecommendationsRole.Arn'
+      MemorySize: 128
+      Timeout: 60
+      Code:
+        ZipFile: |
+          import boto3
+
+          def lambda_handler(event, context):
+              match event["AutomationFlow"]:
+                  case "Idle":
+                      return get_idle_recommendations()
+                  case "EC2":
+                      return get_ec2_recommendations()
+                  case "EBS":
+                      return get_ebs_recommendations()
+                  case _:
+                      return []
+
+          def get_idle_recommendations():
+              client = boto3.client('compute-optimizer')
+              data = []
+              filters = [{'name': 'Finding', 'values': ['Unattached']}]
+
+              response = client.get_idle_recommendations(
+                  filters=filters
+              )
+              data.extend(response["idleRecommendations"])
+
+              # Handle pagination
+              while 'nextToken' in response:
+                  response = client.get_idle_recommendations(
+                      nextToken = response["nextToken"],
+                      filters=filters
+                  )
+                  data.extend(response["idleRecommendations"])
+              
+              # Process and filter the data
+              filtered_data = []    
+              for finding in data:
+                  filtered_data.append({
+                      'resourceId': finding['resourceId'],
+                      'resourceArn': finding['resourceArn'],
+                      'finding': finding['finding'],
+                      'resourceType': finding['resourceType'],
+                      'savings_opportunity': finding['savingsOpportunityAfterDiscounts']['estimatedMonthlySavings']['value'],
+                      'savings_opportunity_percentage': finding['savingsOpportunityAfterDiscounts']['savingsOpportunityPercentage']
+                  })
+                  
+              return filtered_data
+              
+          def get_ec2_recommendations():
+              client = boto3.client('compute-optimizer')
+              data = []
+              filters = [{'name': 'Finding', 'values': ['OVER_PROVISIONED']}]
+              recommendationPreferences = {'cpuVendorArchitectures': ['CURRENT']}
+
+              response = client.get_ec2_instance_recommendations(
+                  filters = filters,
+                  recommendationPreferences = recommendationPreferences
+              )
+              data.extend(response["instanceRecommendations"])
+
+              # Handle pagination
+              while 'nextToken' in response:
+                  response = client.get_ec2_instance_recommendations(
+                      nextToken = response["nextToken"],
+                      filters = filters,
+                      recommendationPreferences = recommendationPreferences
+                  )
+                  data.extend(response["instanceRecommendations"])
+
+              # Process and filter the data
+              filtered_data = []    
+              for finding in data:
+                  instance_name = 'NA'
+                  if 'instanceName' in finding:
+                      instance_name = finding['instanceName']
+                      
+                  recommendationOptions = []
+                  for recommendationOption in finding['recommendationOptions']:
+                      recommendationOptions.append({
+                          'instanceType':recommendationOption['instanceType'],
+                          'performanceRisk': recommendationOption['performanceRisk'],
+                          'migrationEffort': recommendationOption['migrationEffort'],
+                          'platformDifferences': recommendationOption['platformDifferences'],
+                          'savings_opportunity': recommendationOption['savingsOpportunityAfterDiscounts']['estimatedMonthlySavings']['value'],
+                          'savings_opportunity_percentage': recommendationOption['savingsOpportunityAfterDiscounts']['savingsOpportunityPercentage']
+                      })
+                      
+                  filtered_data.append({
+                      'resourceId': finding['instanceArn'].split('/')[1],
+                      'resourceArn': finding['instanceArn'],
+                      'finding': finding['finding'],
+                      'resourceName': instance_name,
+                      'region': finding['instanceArn'].split(':')[3],
+                      'currentInstanceType': finding['currentInstanceType'],
+                      'recommendationOptions': recommendationOptions
+                  })
+              
+              return filtered_data
+
+          def get_ebs_recommendations():
+              client = boto3.client('compute-optimizer')
+              data = []
+              filters = [{'name': 'Finding', 'values': ['NotOptimized']}]
+
+              response = client.get_ebs_volume_recommendations(
+                  filters = filters
+              )
+              data.extend(response["volumeRecommendations"])
+
+              # Handle pagination
+              while 'nextToken' in response:
+                  response = client.get_ebs_volume_recommendations(
+                      nextToken = response["nextToken"],
+                      filters=filters
+                  )
+                  data.extend(response["volumeRecommendations"])
+              
+              # Process and filter the data
+              filtered_data = []    
+              for finding in data:
+                  recommendationOptions = []
+                  for recommendationOption in finding['volumeRecommendationOptions']:
+                      recommendationOptions.append({
+                          'performanceRisk': recommendationOption['performanceRisk'],
+                          'new_VolumeType': recommendationOption['configuration']['volumeType'],
+                          'new_VolumeBaselineIOPS': recommendationOption['configuration']['volumeBaselineIOPS'],
+                          'new_VolumeBaselineThroughput': recommendationOption['configuration']['volumeBaselineThroughput'],
+                          'savings_opportunity': recommendationOption['savingsOpportunityAfterDiscounts']['estimatedMonthlySavings']['value'],
+                          'savings_opportunity_percentage': recommendationOption['savingsOpportunityAfterDiscounts']['savingsOpportunityPercentage']
+                      })
+                  
+                  filtered_data.append({
+                      'resourceId': finding['volumeArn'].split('/')[1],
+                      'resourceArn': finding['volumeArn'],
+                      'finding': finding['finding'],
+                      'current_VolumeType': finding['currentConfiguration']['volumeType'],
+                      'current_VolumeBaselineIOPS': finding['currentConfiguration']['volumeBaselineIOPS'],
+                      'current_VolumeBaselineThroughput': finding['currentConfiguration']['volumeBaselineThroughput'],
+                      'recommendationOptions': recommendationOptions
+                  })
+                  
+              return filtered_data
+
+  LambdaGetRecommendationsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Action:
+              - 'sts:AssumeRole'
+            Effect: 'Allow'
+            Principal:
+              Service:
+                - 'lambda.amazonaws.com'
+      Policies:
+        - PolicyName: RolePolicy 
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: 
+                  - !Sub 'arn:${AWS::Partition}:logs:*:*:*' 
+              - Effect: Allow
+                Action:
+                  - 'ec2:DescribeVolumes'
+                  - 'ec2:DescribeInstances'
+                  - 'compute-optimizer:GetEC2InstanceRecommendations'
+                  - 'compute-optimizer:GetEBSVolumeRecommendations'
+                  - 'compute-optimizer:GetIdleRecommendations'
+                Resource: '*' 
+
   # START - Idle recommendations
   # Lambda that validates Idle recommendation
 
@@ -639,8 +826,21 @@ Resources:
           import boto3
           import os
           from datetime import datetime, timedelta
+          import logging
+
+          # Set up logging
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+          logging.getLogger("boto3").setLevel(logging.WARNING)
+          logging.getLogger("botocore").setLevel(logging.WARNING)
 
           def determine_next_maintenance_window():
+              """
+              Calculate the UTC time for the next maintenance window. This time will later be used to make the changes.
+              
+              Returns:
+                  str: UTC timestamp in ISO format (YYYY-MM-DDTHH:MM:SSZ)
+              """
               maintenance_window_day = os.environ['MaintenanceWindowDay']
               maintenance_window_time = os.environ['MaintenanceWindowTime']
 
@@ -649,6 +849,7 @@ Resources:
               weekdays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
               weekday = weekdays.index(maintenance_window_day)
               now = datetime.utcnow()
+              
               days_until_maintance_window = (7 + weekday - now.weekday()) % 7
               if days_until_maintance_window == 0 and now.time() > hour:
                   days_until_maintance_window = 7
@@ -661,36 +862,58 @@ Resources:
               return maintance_window_utc_timestamp
 
           def lambda_handler(event, context):
-              exclude_tag = os.environ['ExcludeTag']
-              resource_id = event['ResourceId']
-
-              maintance_window_utc_timestamp = determine_next_maintenance_window()
+              """
+              AWS Lambda handler for processing idle volume optimization recommendations.
               
-              ec2 = boto3.client('ec2')
-              response = ec2.describe_volumes(VolumeIds=[resource_id])
-              volume = response['Volumes'][0]
+              Returns:
+                  Dict containing either recommendation details or exclusion message
+              """
+              try:
+                  # Get environment variables and event details
+                  exclude_tag = os.environ['ExcludeTag']
+                  approval = os.environ['Approval']
+                  resource_id = event['resourceId']
+                  resource_arn = event['resourceArn']
+                  
+                  # Get maintenance window
+                  maintenance_window_utc_timestamp = determine_next_maintenance_window()
+                  
+                  # Get volume details
+                  try:
+                      ec2 = boto3.client('ec2')
+                      response = ec2.describe_volumes(VolumeIds=[resource_id])
+                      volume = response['Volumes'][0]
+                  except Exception as e:
+                      logger.error(f"Error getting volume details: {str(e)}")
+                      raise
+                  
+                  # Check if the EBS volume is eligible for optimization.   
+                  if 'Tags' in volume:
+                      tags = volume['Tags']
+                      for tag in tags:
+                          if tag['Key'] == exclude_tag:
+                              return {
+                                  "change_option_detected": False,
+                                  "resource_id": resource_id,
+                                  "resource_arn": resource_arn,
+                                  "message": "This resource is excluded from the Compute Optimization automation (due to the tag)"
+                              }
+                  
+                  # Return recommendation details
+                  return {
+                      "change_option_detected": True,
+                      "approval": approval,
+                      "maintenance_window": maintenance_window_utc_timestamp,
+                      "resource_arn": resource_arn,
+                      "resource_id": resource_id,
+                      "resource_type": event['resourceType'],
+                      "savings_opportunity": event['savings_opportunity'],
+                      "savings_opportunity_percentage": event['savings_opportunity_percentage']
+                  }
               
-              if 'Tags' in volume:
-                  tags = volume['Tags']
-                  for tag in tags:
-                      if tag['Key'] == exclude_tag:
-                          return {
-                              "change_option_detected": False,
-                              "resource_id": resource_id,
-                              "resource_arn": event['ResourceArn'],
-                              "message": "This resource is excluded from the Compute Optimization automation (due to the tag)"
-                          }
-              
-              return {
-                  "change_option_detected": True,
-                  "approval": os.environ['Approval'],
-                  "maintenance_window": maintance_window_utc_timestamp,
-                  "resource_arn": event['ResourceArn'],
-                  "resource_id": resource_id,
-                  "resource_type": event['ResourceType'],
-                  "savings_opportunity": event['SavingsOpportunityAfterDiscounts']['EstimatedMonthlySavings']['Value'],
-                  "savings_opportunity_percentage": event['SavingsOpportunityAfterDiscounts']['SavingsOpportunityPercentage']
-              }
+              except Exception as e:
+                  logger.error(f"Error in lambda_handler: {str(e)}")
+                  raise
 
   LambdaValidateIdleRecommendationRole:
     Type: AWS::IAM::Role
@@ -737,18 +960,29 @@ Resources:
             "States": {
               "GetIdleRecommendations": {
                 "Type": "Task",
+                "Resource": "arn:aws:states:::lambda:invoke",
+                "OutputPath": "$.Payload",
                 "Parameters": {
-                  "Filters": [
-                    {
-                      "Name": "Finding",
-                      "Values": [
-                        "Unattached"
-                      ]
-                    }
-                  ]
+                  "FunctionName": "${LambdaGetRecommendationsFunction.Arn}",
+                  "Payload": {
+                    "AutomationFlow": "Idle"
+                  }
                 },
-                "Resource": "arn:aws:states:::aws-sdk:computeoptimizer:getIdleRecommendations",
-                "Next": "Iterate Recommendations"
+                "Retry": [
+                  {
+                    "ErrorEquals": [
+                      "Lambda.ServiceException",
+                      "Lambda.AWSLambdaException",
+                      "Lambda.SdkClientException",
+                      "Lambda.TooManyRequestsException"
+                    ],
+                    "IntervalSeconds": 1,
+                    "MaxAttempts": 3,
+                    "BackoffRate": 2,
+                    "JitterStrategy": "FULL"
+                  }
+                ],
+                "Next": "Iterate Recommendations" 
               },
               "Iterate Recommendations": {
                 "Type": "Map",
@@ -763,14 +997,14 @@ Resources:
                       "Type": "Choice",
                       "Choices": [
                         {
-                          "Variable": "$.Finding",
+                          "Variable": "$.finding",
                           "StringEquals": "Unattached",
-                          "Next": "validate EBS volume"
+                          "Next": "validate Idle EBS volume"
                         }
                       ],
                       "Default": "Not Unattached EBS Finding"
                     },
-                    "validate EBS volume": {
+                    "validate Idle EBS volume": {
                       "Type": "Task",
                       "Resource": "arn:aws:states:::lambda:invoke",
                       "OutputPath": "$.Payload",
@@ -961,7 +1195,6 @@ Resources:
                   }
                 },
                 "End": true,
-                "ItemsPath": "$.IdleRecommendations",
                 "Label": "IterateRecommendations"
               }
             }
@@ -996,6 +1229,7 @@ Resources:
                   - 'lambda:InvokeFunction'
                 Resource:
                   - !GetAtt LambdaValidateIdleRecommendationFunction.Arn
+                  - !GetAtt LambdaGetRecommendationsFunction.Arn
               - Effect: Allow
                 Action:
                   - 'compute-optimizer:GetIdleRecommendations'
@@ -1033,8 +1267,21 @@ Resources:
           import boto3
           import os
           from datetime import datetime, timedelta
+          import logging
+
+          # Set up logging
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+          logging.getLogger("boto3").setLevel(logging.WARNING)
+          logging.getLogger("botocore").setLevel(logging.WARNING)
 
           def determine_next_maintenance_window():
+              """
+              Calculate the UTC time for the next maintenance window. This time will later be used to make the changes.
+              
+              Returns:
+                  str: UTC timestamp in ISO format (YYYY-MM-DDTHH:MM:SSZ)
+              """
               maintenance_window_day = os.environ['MaintenanceWindowDay']
               maintenance_window_time = os.environ['MaintenanceWindowTime']
 
@@ -1043,6 +1290,7 @@ Resources:
               weekdays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
               weekday = weekdays.index(maintenance_window_day)
               now = datetime.utcnow()
+              
               days_until_maintance_window = (7 + weekday - now.weekday()) % 7
               if days_until_maintance_window == 0 and now.time() > hour:
                   days_until_maintance_window = 7
@@ -1050,59 +1298,82 @@ Resources:
               time_until_maintance_window = timedelta(days=days_until_maintance_window)
               next_maintance_window = now + time_until_maintance_window
               next_maintance_window = next_maintance_window.replace(hour=hour.hour, minute=hour.minute, second=0, microsecond=0)
-              maintance_window_utc_timestamp = next_maintance_window.strftime("%Y-%m-%dT%H:%M:%SZ")
-              return maintance_window_utc_timestamp
+              maintenance_window_utc_timestamp = next_maintance_window.strftime("%Y-%m-%dT%H:%M:%SZ")
 
+              return maintenance_window_utc_timestamp
 
           def lambda_handler(event, context):
-              exclude_tag = os.environ['ExcludeTag']
-              approval = os.environ['Approval']
-              risk_profile = ['No Risk', 'Very Low', 'Low', 'Medium', 'High', 'Very High'].index(os.environ['RiskProfile'])
-              resource_id = event['VolumeArn'].split('/')[1]
-              current_VolumeType = event['CurrentConfiguration']['VolumeType']
-              current_VolumeBaselineIOPS = event['CurrentConfiguration']['VolumeBaselineIOPS']
-              current_VolumeBaselineThroughput = event['CurrentConfiguration']['VolumeBaselineThroughput']
-              return_message = {
-                  "change_option_detected": False,
-                  "resource_id": resource_id,
-                  "resource_arn": event['VolumeArn'],
-                  "message": "None of the recommendations met the requirements"
-              }
+              """
+              AWS Lambda handler for evaluating EBS volume optimization recommendations.
               
-              maintance_window_utc_timestamp = determine_next_maintenance_window()
+              Returns:
+                  Dict containing either recommendation details or message explaining why no change is recommended
+              """
+              try:
+                  # Get environment variables and event details
+                  exclude_tag = os.environ['ExcludeTag']
+                  approval = os.environ['Approval']
+                  risk_profile = ['No Risk', 'Very Low', 'Low', 'Medium', 'High', 'Very High'].index(os.environ['RiskProfile'])
+                  
+                  resource_id = event['resourceId']
+                  resource_arn = event['resourceArn']
+                  current_volume_type = event['current_VolumeType']
+                  current_volume_baseline_iops = event['current_VolumeBaselineIOPS']
+                  current_volume_baseline_throughput = event['current_VolumeBaselineThroughput']
+
+                  # Initialize return message
+                  return_message = {
+                      "change_option_detected": False,
+                      "resource_id": resource_id,
+                      "resource_arn": resource_arn,
+                      "message": "None of the recommendations met the requirements"
+                  }
+
+                  # Get maintenance window
+                  maintenance_window_utc_timestamp = determine_next_maintenance_window()
+                  
+                  # Get volume details
+                  try:
+                      ec2 = boto3.client('ec2')
+                      response = ec2.describe_volumes(VolumeIds=[resource_id])
+                      volume = response['Volumes'][0]
+                  except Exception as e:
+                      logger.error(f"Error getting volume details: {str(e)}")
+                      raise
               
-              ec2 = boto3.client('ec2')
-              response = ec2.describe_volumes(VolumeIds=[resource_id])
-              volume = response['Volumes'][0]
-              
-              if 'Tags' in volume:
-                  tags = volume['Tags']
-                  for tag in tags:
-                      if tag['Key'] == exclude_tag:
-                          return_message["message"] = "The instance is excluded from the Compute Optimization automation (due to the tag)"
-                          return return_message
-              
-              for recommendation in event['VolumeRecommendationOptions']:
-                  if recommendation['PerformanceRisk'] <= risk_profile and 'SavingsOpportunity' in recommendation:
-                      if recommendation['SavingsOpportunity']['EstimatedMonthlySavings']['Value'] > 0:
+                  # Check if the EBS volume is eligible for optimization.
+                  if 'Tags' in volume:
+                      tags = volume['Tags']
+                      for tag in tags:
+                          if tag['Key'] == exclude_tag:
+                              return_message["message"] = "The instance is excluded from the Compute Optimization automate recommendations (due to the tag)"
+                              return return_message
+                          
+                  # Evaluate recommendations
+                  for recommendation in event['recommendationOptions']:
+                      if recommendation['performanceRisk'] <= risk_profile and recommendation['savings_opportunity'] > 0:
                           return {
                               "change_option_detected": True,
                               "approval": approval,
-                              "maintenance_window": maintance_window_utc_timestamp,
-                              "resource_arn": event['VolumeArn'],
+                              "maintenance_window": maintenance_window_utc_timestamp,
+                              "resource_arn": resource_arn,
                               "resource_id": resource_id,
-                              "current_VolumeType": current_VolumeType,
-                              "current_VolumeBaselineIOPS": current_VolumeBaselineIOPS,
-                              "current_VolumeBaselineThroughput": current_VolumeBaselineThroughput,
-                              "new_VolumeType": recommendation['Configuration']['VolumeType'],
-                              "new_VolumeBaselineIOPS": recommendation['Configuration']['VolumeBaselineIOPS'],
-                              "new_VolumeBaselineThroughput": recommendation['Configuration']['VolumeBaselineThroughput'],
-                              "performance_risk": recommendation['PerformanceRisk'],
-                              "savings_opportunity": recommendation['SavingsOpportunity']['EstimatedMonthlySavings']['Value'],
-                              "savings_opportunity_percentage": recommendation['SavingsOpportunity']['SavingsOpportunityPercentage']
-                          }      
-              
-              return return_message
+                              "current_VolumeType": current_volume_type,
+                              "current_VolumeBaselineIOPS": current_volume_baseline_iops,
+                              "current_VolumeBaselineThroughput": current_volume_baseline_throughput,
+                              "new_VolumeType": recommendation['new_VolumeType'],
+                              "new_VolumeBaselineIOPS": recommendation['new_VolumeBaselineIOPS'],
+                              "new_VolumeBaselineThroughput": recommendation['new_VolumeBaselineThroughput'],
+                              "performance_risk": recommendation['performanceRisk'],
+                              "savings_opportunity": recommendation['savings_opportunity'],
+                              "savings_opportunity_percentage": recommendation['savings_opportunity_percentage']
+                          }
+
+                  return return_message
+
+              except Exception as e:
+                  logger.error(f"Error in lambda_handler: {str(e)}")
+                  raise
 
   LambdaValidateEBSRecommendationRole:
     Type: AWS::IAM::Role
@@ -1242,18 +1513,29 @@ Resources:
             "States": {
               "GetEBSVolumeRecommendations": {
                 "Type": "Task",
+                "Resource": "arn:aws:states:::lambda:invoke",
+                "OutputPath": "$.Payload",
                 "Parameters": {
-                  "Filters": [
-                    {
-                      "Name": "Finding",
-                      "Values": [
-                        "NotOptimized"
-                      ]
-                    }
-                  ]
+                  "FunctionName": "${LambdaGetRecommendationsFunction.Arn}",
+                  "Payload": {
+                    "AutomationFlow": "EBS"
+                  }
                 },
-                "Resource": "arn:aws:states:::aws-sdk:computeoptimizer:getEBSVolumeRecommendations",
-                "Next": "Iterate Recommendations"
+                "Retry": [
+                  {
+                    "ErrorEquals": [
+                      "Lambda.ServiceException",
+                      "Lambda.AWSLambdaException",
+                      "Lambda.SdkClientException",
+                      "Lambda.TooManyRequestsException"
+                    ],
+                    "IntervalSeconds": 1,
+                    "MaxAttempts": 3,
+                    "BackoffRate": 2,
+                    "JitterStrategy": "FULL"
+                  }
+                ],
+                "Next": "Iterate Recommendations" 
               },
               "Iterate Recommendations": {
                 "Type": "Map",
@@ -1268,7 +1550,7 @@ Resources:
                       "Type": "Choice",
                       "Choices": [
                         {
-                          "Variable": "$.Finding",
+                          "Variable": "$.finding",
                           "StringEquals": "NotOptimized",
                           "Next": "validate EBS volume"
                         }
@@ -1418,7 +1700,6 @@ Resources:
                   }
                 },
                 "End": true,
-                "ItemsPath": "$.VolumeRecommendations",
                 "Label": "IterateRecommendations"
               }
             }
@@ -1454,6 +1735,7 @@ Resources:
                 Resource:
                   - !GetAtt LambdaValidateEBSRecommendationFunction.Arn
                   - !GetAtt LambdaUpdateEBSResourceFunction.Arn
+                  - !GetAtt LambdaGetRecommendationsFunction.Arn
               - Effect: Allow
                 Action:
                   - 'compute-optimizer:GetEBSVolumeRecommendations'
@@ -1488,8 +1770,21 @@ Resources:
           import boto3
           import os
           from datetime import datetime, timedelta
+          import logging
+
+          # Set up logging
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+          logging.getLogger("boto3").setLevel(logging.WARNING)
+          logging.getLogger("botocore").setLevel(logging.WARNING)
 
           def determine_next_maintenance_window():
+              """
+              Calculate the UTC time for the next maintenance window. This time will later be used to make the changes.
+              
+              Returns:
+                  str: UTC timestamp in ISO format (YYYY-MM-DDTHH:MM:SSZ)
+              """
               maintenance_window_day = os.environ.get('MaintenanceWindowDay')
               maintenance_window_time = os.environ.get('MaintenanceWindowTime')
 
@@ -1508,88 +1803,135 @@ Resources:
               maintance_window_utc_timestamp = next_maintance_window.strftime("%Y-%m-%dT%H:%M:%SZ")
               return maintance_window_utc_timestamp
 
+          def check_instance_eligibility(ec2_instance, ec2_client, resource_id, exclude_tag):
+              """
+              Check if the EC2 instance is eligible for optimization.
+              
+              Returns:
+                  tuple: (is_eligible: bool, message: str)
+              """
+              try:
+                  # Check stop protection
+                  stop_protection = ec2_instance.describe_attribute(Attribute='disableApiStop')
+                  if stop_protection['DisableApiStop']['Value']:
+                      return False, "The instance was configured with Stop Protection"
+
+                  # Get instance details
+                  response = ec2_client.describe_instances(InstanceIds=[resource_id])
+                  instance = response['Reservations'][0]['Instances'][0]
+
+                  # Check tags
+                  if 'Tags' in instance:
+                      for tag in instance['Tags']:
+                          if tag['Key'] == exclude_tag:
+                              return False, "The instance is excluded from the Compute Optimization automation (due to the tag)"
+                          if tag['Key'] == 'aws:autoscaling:groupName':
+                              return False, "The instance is part of an ASG"
+
+                  # Check ODCR
+                  if instance['CapacityReservationSpecification']['CapacityReservationPreference'] != 'open':
+                      return False, "The instance is part of an ODCR"
+
+                  # Check Placement Group
+                  if instance['Placement']['GroupName']:
+                      return False, "The instance is part of a Placement Group"
+
+                  return True, ""
+
+              except Exception as e:
+                  logger.error(f"Error checking instance eligibility: {str(e)}")
+                  raise
+
+          def evaluate_recommendation(recommendation, current_instance_type, risk_profile, architectural_change):
+              """
+              Evaluate if a recommendation meets the required criteria.
+              """
+              if recommendation['performanceRisk'] > risk_profile:
+                  return False
+
+              if recommendation['instanceType'] == current_instance_type:
+                  return False
+
+              if 'Architecture' in recommendation['platformDifferences'] and architectural_change != 'yes':
+                  return False
+
+              if 'Hypervisor' not in recommendation['platformDifferences']:
+                  if 'InstanceStoreAvailability' in recommendation['platformDifferences']:
+                      return False
+                  return True
+
+              return False
 
           def lambda_handler(event, context):
+              """
+              AWS Lambda handler for evaluating EC2 instance optimization recommendations.
               
-              exclude_tag = os.environ['ExcludeTag']
-              approval = os.environ['Approval']
-              architectural_change = os.environ['ArchitecturalChange']
-              risk_profile = ['No Risk', 'Very Low', 'Low', 'Medium', 'High', 'Very High'].index(os.environ['RiskProfile'])
-              resource_id = event['InstanceArn'].split('/')[1]
-              region = event['InstanceArn'].split(':')[3]
-              instance_name = 'NA'
-              if 'InstanceName' in event:
-                  instance_name = event['InstanceName']
+              Returns:
+                  Dict containing either recommendation details or message explaining why no change is recommended
+              """
+              try:
+                  # Get environment variables
+                  exclude_tag = os.environ['ExcludeTag']
+                  approval = os.environ['Approval']
+                  architectural_change = os.environ['ArchitecturalChange']
+                  risk_profile = ['No Risk', 'Very Low', 'Low', 'Medium', 'High', 'Very High'].index(os.environ['RiskProfile'])
 
-              return_message = {
-                  "change_option_detected": False,
-                  "resource_id": resource_id,
-                  "resource_arn": event['InstanceArn'],
-                  "resource_name": instance_name,
-                  "message": "None of the recommendations met the requirements"
-              }
-              
-              maintance_window_utc_timestamp = determine_next_maintenance_window()
+                  # Extract event details
+                  resource_id = event['resourceId']
+                  resource_arn = event['resourceArn']
+                  resource_name = event['resourceName']
 
-              ec2 = boto3.resource('ec2')
-              ec2_instance = ec2.Instance(resource_id)
-              stop_protection = ec2_instance.describe_attribute(Attribute='disableApiStop')
-              if stop_protection['DisableApiStop']['Value'] == True:
-                  return_message["message"] = "The instance was configured with Stop Protection"
-                  return return_message
+                  # Initialize return message
+                  return_message = {
+                      "change_option_detected": False,
+                      "resource_id": resource_id,
+                      "resource_arn": resource_arn,
+                      "resource_name": resource_name,
+                      "message": "None of the recommendations met the requirements"
+                  }
 
-              ec2_client = boto3.client('ec2', region_name=region)
-              response = ec2_client.describe_instances(InstanceIds=[resource_id])
+                  # Initialize AWS clients
+                  ec2 = boto3.resource('ec2')
+                  ec2_client = boto3.client('ec2', region_name=event['region'])
+                  ec2_instance = ec2.Instance(resource_id)
 
-              if 'Tags' in response['Reservations'][0]['Instances'][0]:
-                  tags = response['Reservations'][0]['Instances'][0]['Tags']
+                  # Check instance eligibility
+                  is_eligible, message = check_instance_eligibility(
+                      ec2_instance, ec2_client, resource_id, exclude_tag
+                  )
+                  
+                  if not is_eligible:
+                      return_message["message"] = message
+                      return return_message
 
-                  for tag in tags:
-                      if tag['Key'] == exclude_tag:
-                          return_message["message"] = "The instance is excluded from the Compute Optimization automation (due to the tag)"
-                          return return_message
-                          
-                      if tag['Key'] == 'aws:autoscaling:groupName':
-                          return_message["message"] = "The instance is part of an ASG"
-                          return return_message
-              
-              if response['Reservations'][0]['Instances'][0]['CapacityReservationSpecification']['CapacityReservationPreference'] != 'open':
-                  return_message["message"] = "The instance is part of an ODCR"
-                  return return_message
+                  # Get maintenance window
+                  maintance_window_utc_timestamp = determine_next_maintenance_window()
 
-              if response['Reservations'][0]['Instances'][0]['Placement']['GroupName'] != '':
-                  return_message["message"] = "The instance is part of a Placement Group"
-                  return return_message
-                      
-              for recommendation in event['RecommendationOptions']:
-                  if recommendation['PerformanceRisk'] <= risk_profile and 'SavingsOpportunity' in recommendation:
-                      if recommendation['InstanceType'] == event['CurrentInstanceType']:
-                          continue
-                      
-                      if 'Architecture' in recommendation['PlatformDifferences'] and architectural_change != 'yes':
-                          continue
-
-                      if 'Hypervisor' not in recommendation['PlatformDifferences'] and recommendation['SavingsOpportunity'] != None:
-                          if 'InstanceStoreAvailability' in recommendation['PlatformDifferences']:
-                              continue
-                          
+                  # Evaluate recommendations
+                  for recommendation in event['recommendationOptions']:
+                      if evaluate_recommendation(recommendation, event['currentInstanceType'], 
+                                              risk_profile, architectural_change):
                           return {
-                            "change_option_detected": True,
-                            "approval": approval,
-                            "maintenance_window": maintance_window_utc_timestamp,
-                            "InstanceArn": event['InstanceArn'],
-                            "resource_id": resource_id,
-                            "resource_arn": event['InstanceArn'],
-                            "resource_name": instance_name,
-                            "current_resource_type": event['CurrentInstanceType'],
-                            "new_resource_type": recommendation['InstanceType'],
-                            "migration_effort": recommendation['MigrationEffort'],
-                            "performance_risk": recommendation['PerformanceRisk'],
-                            "savings_opportunity": recommendation['SavingsOpportunity']['EstimatedMonthlySavings']['Value'],
-                            "savings_opportunity_percentage": recommendation['SavingsOpportunity']['SavingsOpportunityPercentage']
-                        }
-                      
-              return return_message
+                              "change_option_detected": True,
+                              "approval": approval,
+                              "maintenance_window": maintance_window_utc_timestamp,
+                              "InstanceArn": resource_arn,
+                              "resource_id": resource_id,
+                              "resource_arn": resource_arn,
+                              "resource_name": resource_name,
+                              "current_resource_type": event['currentInstanceType'],
+                              "new_resource_type": recommendation['instanceType'],
+                              "migration_effort": recommendation['migrationEffort'],
+                              "performance_risk": recommendation['performanceRisk'],
+                              "savings_opportunity": recommendation['savings_opportunity'],
+                              "savings_opportunity_percentage": recommendation['savings_opportunity_percentage']
+                          }
+
+                  return return_message
+
+              except Exception as e:
+                  logger.error(f"Error in lambda_handler: {str(e)}")
+                  raise
 
   LambdaValidateEC2RecommendationRole:
     Type: AWS::IAM::Role
@@ -1824,19 +2166,29 @@ Resources:
             "States": {
               "GetEC2InstanceRecommendations": {
                 "Type": "Task",
+                "Resource": "arn:aws:states:::lambda:invoke",
+                "OutputPath": "$.Payload",
                 "Parameters": {
-                  "Filters": [ 
-                    { 
-                        "Name": "Finding",
-                        "Values": [ "OVER_PROVISIONED" ]
-                    }
-                  ],
-                  "RecommendationPreferences": { 
-                    "CpuVendorArchitectures": [ "CURRENT" ]
+                  "FunctionName": "${LambdaGetRecommendationsFunction.Arn}",
+                  "Payload": {
+                    "AutomationFlow": "EC2"
                   }
                 },
-                "Resource": "arn:aws:states:::aws-sdk:computeoptimizer:getEC2InstanceRecommendations",
-                "Next": "Iterate Recommendations"
+                "Retry": [
+                  {
+                    "ErrorEquals": [
+                      "Lambda.ServiceException",
+                      "Lambda.AWSLambdaException",
+                      "Lambda.SdkClientException",
+                      "Lambda.TooManyRequestsException"
+                    ],
+                    "IntervalSeconds": 1,
+                    "MaxAttempts": 3,
+                    "BackoffRate": 2,
+                    "JitterStrategy": "FULL"
+                  }
+                ],
+                "Next": "Iterate Recommendations" 
               },
               "Iterate Recommendations": {
                 "Type": "Map",
@@ -1851,7 +2203,7 @@ Resources:
                       "Type": "Choice",
                       "Choices": [
                         {
-                          "Variable": "$.Finding",
+                          "Variable": "$.finding",
                           "StringEquals": "OVER_PROVISIONED",
                           "Next": "validate EC2 instance"
                         }
@@ -2054,7 +2406,6 @@ Resources:
                   }
                 },
                 "End": true,
-                "ItemsPath": "$.InstanceRecommendations",
                 "Label": "IterateRecommendations"
               }
             }
@@ -2091,6 +2442,7 @@ Resources:
                   - !GetAtt LambdaValidateEC2RecommendationFunction.Arn 
                   - !GetAtt LambdaUpdateEC2ResourceFunction.Arn
                   - !GetAtt LambdaEC2RollbackFunction.Arn
+                  - !GetAtt LambdaGetRecommendationsFunction.Arn
               - Effect: Allow
                 Action:
                   - 'compute-optimizer:GetEC2InstanceRecommendations'
