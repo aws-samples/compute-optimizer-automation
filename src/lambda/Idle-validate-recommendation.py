@@ -62,7 +62,8 @@ def lambda_handler(event, context):
             logger.error(f"Error getting volume details: {str(e)}")
             raise
         
-        # Check if the EBS volume is eligible for optimization.   
+        # Check if the EBS volume is eligible for optimization.
+        tags = []   
         if 'Tags' in volume:
             tags = volume['Tags']
             for tag in tags:
@@ -73,6 +74,10 @@ def lambda_handler(event, context):
                         "resource_arn": resource_arn,
                         "message": "This resource is excluded from the Compute Optimization automation (due to the tag)"
                     }
+        tags.append({
+            "Key": "created-by-COA",
+            "Value": "yes"
+        })
         
         # Return recommendation details
         return {
@@ -83,7 +88,8 @@ def lambda_handler(event, context):
             "resource_id": resource_id,
             "resource_type": event['resourceType'],
             "savings_opportunity": event['savings_opportunity'],
-            "savings_opportunity_percentage": event['savings_opportunity_percentage']
+            "savings_opportunity_percentage": event['savings_opportunity_percentage'],
+            "tags": tags
         }
     
     except Exception as e:

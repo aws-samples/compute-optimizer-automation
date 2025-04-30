@@ -887,7 +887,8 @@ Resources:
                       logger.error(f"Error getting volume details: {str(e)}")
                       raise
                   
-                  # Check if the EBS volume is eligible for optimization.   
+                  # Check if the EBS volume is eligible for optimization.
+                  tags = []   
                   if 'Tags' in volume:
                       tags = volume['Tags']
                       for tag in tags:
@@ -898,6 +899,10 @@ Resources:
                                   "resource_arn": resource_arn,
                                   "message": "This resource is excluded from the Compute Optimization automation (due to the tag)"
                               }
+                  tags.append({
+                      "Key": "created-by-COA",
+                      "Value": "yes"
+                  })
                   
                   # Return recommendation details
                   return {
@@ -908,7 +913,8 @@ Resources:
                       "resource_id": resource_id,
                       "resource_type": event['resourceType'],
                       "savings_opportunity": event['savings_opportunity'],
-                      "savings_opportunity_percentage": event['savings_opportunity_percentage']
+                      "savings_opportunity_percentage": event['savings_opportunity_percentage'],
+                      "tags": tags
                   }
               
               except Exception as e:
@@ -1058,30 +1064,18 @@ Resources:
                     "Create Snapshot": {
                       "Type": "Task",
                       "Resource": "arn:aws:states:::aws-sdk:ec2:createSnapshot",
-                      "Next": "Tag the Snapshot",
-                      "QueryLanguage": "JSONata",
-                      "Arguments": {
-                        "VolumeId": "{% $states.input.resource_id  %}"
-                      },
-                      "Output": "{%\n    $merge([$states.input, {\n      \"snapshot_id\": $states.result.SnapshotId\n    }])\n%}"
-                    },
-                    "Tag the Snapshot": {
-                      "Type": "Task",
-                      "Resource": "arn:aws:states:::aws-sdk:ec2:createTags",
                       "Next": "Describe Snapshots",
                       "QueryLanguage": "JSONata",
                       "Arguments": {
-                        "Resources": [
-                          "{% $states.input.snapshot_id  %}"
-                        ],
-                        "Tags": [
+                        "VolumeId": "{% $states.input.resource_id %}",
+                        "TagSpecifications": [
                           {
-                            "Key": "created-by",
-                            "Value": "compute-optimizer-automation"
+                            "ResourceType": "snapshot",
+                            "Tags": "{% $states.input.tags %}"
                           }
                         ]
                       },
-                      "Output": "{%\n  $states.input\n%}"
+                      "Output": "{%\n    $merge([$states.input, {\n      \"snapshot_id\": $states.result.SnapshotId\n    }])\n%}"
                     },
                     "Describe Snapshots": {
                       "Type": "Task",
