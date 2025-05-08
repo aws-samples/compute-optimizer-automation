@@ -1,0 +1,169 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'AWS COA - Creates roles for AWS COA cross-account access'
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Cross-Account Configuration"
+        Parameters:
+          - TrustedAccountId
+    ParameterLabels:
+      TrustedAccountId:
+        default: "AWS COA Main Account ID"
+
+Parameters:
+  TrustedAccountId:
+    Type: String
+    Description: 'The AWS account ID where the main AWS COA stack was deployed (automation account).'
+    AllowedPattern: '^\d{12}$'
+    ConstraintDescription: 'Must be a valid 12-digit AWS account ID'
+
+Resources:
+  # Role for validating enrollment status
+  ValidateEnrollmentStatusRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: coa-validate-enrollment-status
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${TrustedAccountId}:root'
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: ComputeOptimizerAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'compute-optimizer:GetEnrollmentStatus'
+                  - 'ec2:DescribeRegions'
+                Resource: '*'
+
+  # Role for getting recommendations
+  GetRecommendationsRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: coa-get-recommendations
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${TrustedAccountId}:root'
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: ComputeOptimizerRecommendations
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'compute-optimizer:GetIdleInstanceRecommendations'
+                  - 'compute-optimizer:GetEC2InstanceRecommendations'
+                  - 'compute-optimizer:GetEBSVolumeRecommendations'
+                  - 'compute-optimizer:GetIdleRecommendations'
+                  - 'ec2:DescribeInstances'
+                  - 'ec2:DescribeVolumes'
+                Resource: '*'
+
+  # Role for validating resources
+  ValidateResourcesRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: coa-validate-recommendation
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${TrustedAccountId}:root'
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: ValidateEC2EBS
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'ec2:DescribeVolumes'
+                  - 'ec2:DescribeInstances'
+                  - 'ec2:DescribeInstanceAttribute'
+                Resource: '*'
+
+  # Role for creating snapshots and deleting volumes
+  ModifyResourcesRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: coa-update-resource
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${TrustedAccountId}:root'
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: ModifyEC2EBS
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'ec2:CreateSnapshot'
+                  - 'ec2:CreateTags'
+                  - 'ec2:DeleteVolume'
+                  - 'ec2:DescribeSnapshots'
+                  - 'ec2:DescribeVolumes'
+                  - 'ec2:ModifyVolume'
+                  - 'ec2:DescribeInstances'
+                  - 'ec2:StartInstances'
+                  - 'ec2:ModifyInstanceAttribute'
+                  - 'ec2:StopInstances'
+                Resource: '*'
+  
+  # Role for getting the list of accounts
+  GetAccountsRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: coa-organization-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${TrustedAccountId}:root'
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: OrgAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'organizations:ListAccounts'
+                Resource: '*'
+
+Outputs:
+  ValidateEnrollmentStatusRoleARN:
+    Description: 'ARN of the role for validating enrollment status'
+    Value: !GetAtt ValidateEnrollmentStatusRole.Arn
+
+  GetRecommendationsRoleARN:
+    Description: 'ARN of the role for getting recommendations'
+    Value: !GetAtt GetRecommendationsRole.Arn
+
+  ValidateResourcesRoleARN:
+    Description: 'ARN of the role for validating resources'
+    Value: !GetAtt ValidateResourcesRole.Arn
+
+  ModifyResourcesRoleARN:
+    Description: 'ARN of the role for making changes to EBS'
+    Value: !GetAtt ModifyResourcesRole.Arn
+  
+  GetAccountsRoleARN:
+    Description: 'ARN of the role for getting the list of accounts on the organization'
+    Value: !GetAtt GetAccountsRole.Arn

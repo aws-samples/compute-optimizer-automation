@@ -1,10 +1,10 @@
 # AWS Compute Optimizer Automation (AWS COA)
 
-AWS Compute Optimizer Automation (AWS COA) automates the process of implementing recommendations from AWS Compute Optimizer enabling you to efficiently optimize your AWS resources and reduce costs. AWS Compute Optimizer is a service that analyzes the configurations and utilization data of your AWS resources to provide optimization recommendations. However, many customers find it challenging to fully capitalize on the potential savings due to the manual effort and time required to apply these recommendations.
+AWS Compute Optimizer Automation (AWS COA) automates the process of implementing recommendations from AWS Compute Optimizer, enabling you to efficiently optimize your AWS resources and reduce costs across your entire AWS Organization. AWS Compute Optimizer is a service that analyzes the configurations and utilization data of your AWS resources to provide optimization recommendations. However, many customers find it challenging to fully capitalize on the potential savings due to the manual effort and time required to apply these recommendations. AWS COA takes these recommendations and applies them automatically, following your defined risk profile and approval processes.
 
 # Key Benefits
 
-* **Cost Savings:** AWS COA helps you identify and address overprovisioned resources, leading to cost savings in your AWS environment.
+* **Cost Savings:** AWS COA helps you identify and address overprovisioned resources, leading to cost savings in your AWS Organization.
 
 * **Automated Optimization:** The solution automates the process of evaluating and applying recommendations, reducing the burden on your team and ensuring your resources are consistently optimized.
 
@@ -12,19 +12,21 @@ AWS Compute Optimizer Automation (AWS COA) automates the process of implementing
 
 * **Enhanced User Control:** With optional approval features, you can obtain user approval before any resource changes are implemented, providing greater control and oversight.
 
+* **Organization-Wide Management:** AWS COA can manage resources across all accounts in your AWS Organization, providing a centralized optimization solution.
+
 # Architecture
 
-The AWS COA architecture is built around an AWS Step Function, which efficiently handles the optimization process. Here's how it works:
+The AWS COA architecture is built around AWS Step Functions, which efficiently handle the optimization process across your entire AWS Organization. Here's how it works:
 
-1. **Data Collection:** AWS Compute Optimizer analyzes your AWS resources and generates optimization recommendations.
+1. **Organization Discovery:** AWS COA discovers all accounts and regions in your AWS Organization, or uses a predefined list if provided.
 
-2. **Parallel Processing:** Each resource recommendation is processed in parallel by AWS COA to determine if it corresponds to an overprovisioned resource and whether it aligns with your defined risk profile.
+2. **Data Collection:** AWS COA uses data from AWS Compute Optimizer that analyzes your AWS resources and generates optimization recommendations for each account and region.
 
-3. **Optional User Approval:** If enabled, AWS COA sends an approval request via EventBridge, SNS and API Gateway before making any changes. This ensures you have the final say in resource modifications.
+3. **Parallel Processing:** Each account and region is processed in parallel, with each resource recommendation further processed in parallel to determine if it corresponds to an overprovisioned resource and whether it aligns with your defined risk profile.
 
-4. **Maintenance Window:** The solution waits until the next maintenance window before applying any changes to your resources. This allows for controlled and scheduled updates, minimizing disruption.
+4. **Optional User Approval:** If enabled, AWS COA sends an approval request via EventBridge, SES, DynamoDB, and API Gateway before making any changes. This ensures you have the final say in resource modifications.
 
-5. **Rollback:** In case of any errors during the update process, AWS COA automatically rolls back the resource to its original configuration and notifies the user about the issue.
+5. **Maintenance Window:** The solution waits until the next maintenance window before applying any changes to your resources. This allows for controlled and scheduled updates, minimizing disruption.
 
 ![architecture](img/architecture.png)
 
@@ -38,7 +40,6 @@ AWS COA currently supports the following automation processes:
 
 3. **Deleting unattached idle EBS volumes** – Identifies and removes EBS volumes that are no longer attached to any instance and have been flagged as idle by AWS Compute Optimizer.
 
-
 ![Automation Flows](img/automation-flows.png)
 
 # Getting Started
@@ -47,45 +48,70 @@ Follow these steps to get started with AWS COA:
 
 1. **Configure AWS Compute Optimizer:** Ensure AWS Compute Optimizer is enabled and configured to analyze your AWS resources.
 
-2. **Set Up AWS COA:** Use AWS CloudFormation to deploy the AWS COA solution. You can deploy the solution using the provided CloudFormation template available at [AWS-Compute-Optimizer-Automation.yml](src/cf-template/AWS-Compute-Optimizer-Automation.yml). This template includes the required AWS Step Functions, Lambda functions, and an optional default approval flow that uses SNS and API Gateway.
+2. **Deploy the Main Stack in the Automation Account:** The main AWS COA stack must be deployed in the account that will serve as your automation account. This stack includes all the automation components such as Step Functions, Lambda functions, and the optional approval flow (SES, DynamoDB, and API Gateway).
 
-    [![Launch Stack](https://cdn.rawgit.com/buildkite/cloudformation-launch-stack-button-svg/master/launch-stack.svg)](https://console.aws.amazon.com/cloudformation/home#/stacks/new?templateURL=https://compute-optimizer-automation.s3.us-east-1.amazonaws.com/cf-template/AWS-Compute-Optimizer-Automation.yml)
+    You can deploy this stack using the provided CloudFormation template:
 
-3. **Stack name:** Enter a name for the stack to be created.
+    * Template Location: [AWS-Compute-Optimizer-Automation.yml](/src/cf-template/AWS-Compute-Optimizer-Automation.yml)
+    
+    * Quick Deploy: 
+        
+        [![Launch Stack](https://cdn.rawgit.com/buildkite/cloudformation-launch-stack-button-svg/master/launch-stack.svg)](https://console.aws.amazon.com/cloudformation/home#/stacks/create/review?templateURL=https://compute-optimizer-automation.s3.us-east-1.amazonaws.com/cf-template/AWS-Compute-Optimizer-Automation.yml)
 
-4. **Define Parameters:** During the CloudFormation deployment, you'll need to specify various parameters that align with your organization's preferences for automatic resource changes. These parameters include:
+    During this stack deployment, you'll need to specify various parameters that define how the automation works:
 
-    - **ApprovalRequired:** Specify whether an approval request should be sent before making any changes.
+    - **General Configuration**
 
-    - **ArchitecturalChange:** Indicate whether processor changes should be considered.
+        - **Risk Profile:** Define the level of risk acceptable for automated resource changes.
 
-    - **AutomateEBSRecommendations:** Choose whether to automate EBS recommendations from AWS Compute Optimizer.
+        - **Approval Required:** Specify whether an approval request should be sent before making any changes.
 
-    - **AutomateEC2Recommendations:** Choose whether to automate EC2 recommendations from AWS Compute Optimizer.
+        - **Automate EBS Recommendations:** Choose whether to automate EBS recommendations from AWS Compute Optimizer.
 
-    - **AutomateIdleRecommendations:** Specify whether to automate the deletion of EBS volumes identified as idle by AWS Compute Optimizer.
+        - **Automate Idle Recommendations:** Specify whether to automate the deletion of unattached EBS volumes identified as idle by AWS Compute Optimizer.
 
-    - **DefaultApprovalFlow:** Launches a sample approval flow using SNS and API Gateway.
+        - **AutomateEC2Recommendations:** Choose whether to automate EC2 recommendations from AWS Compute Optimizer.
 
-    - **EBSSnapshot:** Specify whether to take a snapshot before upgrading an EC2 instance.
+        - **Create EBS Snapshot:** Specify whether to take a snapshot before upgrading an EC2 instance.
 
-    - **Email:** Email address to receive notifications from AWS COA as part of the default approval flow.
+    - **Approval Flow Configuration**
 
-    - **ExcludeTag:** Define the tag used to identify resources that should be excluded from optimization.
+        - **Deploy Default Approval Flow:** Specify whether to launches the approval flow that uses SES and API Gateway.
 
-    - **MaintenanceWindowDay:** Specify the day for making changes to resources during the maintenance window.
+        - **Default SES Email:** Email address to receive notifications from AWS COA as part of the default approval flow.
 
-    - **MaintenanceWindowTime:** Specify the time (UTC) for making changes to resources during the maintenance window.
+        - **Approver Tag Key:** Define the tag used to identify who needs to receive the approval for the resource
+    
+    - **Maintenance Window Configuration**
 
-    - **RiskProfile:** Define the level of risk acceptable for automated resource changes.
+        - **Maintenance Day:** Specify the day for making changes to resources during the maintenance window.
 
-5. **Resource Optimization:** AWS COA will automatically evaluate the recommendations every other week and apply the relevant recommendations during the designated maintenance window. This ensures that your resources are consistently optimized without manual intervention.
+        - **Maintenance Time (UTC):** Specify the time (UTC) for making changes to resources during the maintenance window.
 
-6. **Optional User Approval (If Enabled):** If user approval is enabled during the CloudFormation setup, an EventBridge event will be created to approve or reject resource changes before they are implemented. This additional layer of control ensures that you have the final say in resource modifications.
+    - **Resource Filtering**
 
-    * If you are using the 'DefaultApprovalFlow', an EventBridge rule will be configured to capture the event. Subsequently, using SNS and API Gateway, a notification will be sent to request the approval or rejection of the change.
+        - **Exclusion Tag Key:** Define the tag used to identify resources that should be excluded from optimization.
 
-    * The EventBridge event can also be utilized for integrating with other approval flows.
+
+3. **Deploy Cross-Account Permissions in the Management Account:** After deploying the main stack, you must deploy the permissions template as a StackSet from your AWS Organization's management account. This StackSet will create the necessary IAM roles in all member accounts to allow the automation account to access and modify resources.
+
+    You can deploy this stack using the provided CloudFormation template:
+
+    * Template Location: [AWS-COA-Cross-Account-Permissions.yml](/src/cf-template/AWS-COA-Cross-Account-Permissions.yml)
+    
+    * Quick Deploy: 
+
+        [![Launch Stack](https://cdn.rawgit.com/buildkite/cloudformation-launch-stack-button-svg/master/launch-stack.svg)](https://console.aws.amazon.com/cloudformation/home#/stacks/create/review?templateURL=https://compute-optimizer-automation.s3.us-east-1.amazonaws.com/cf-template/AWS-COA-Cross-Account-Permissions.yml)
+
+    During the StackSet deployment, you'll need to specify:
+
+    - **AWS COA Main Account ID:** The AWS account ID where the main AWS COA stack was deployed (automation account). This is required to establish the trust relationship for cross-account access.
+
+4. **Optional: Provide Account and Region List:** If you want to limit which accounts and regions the automation runs on, you can provide a list as an SSM parameter document named `'/coa/coa-accounts-regions'`. If this list is provided, the automation won't connect to the management account and will only use the provided data.
+
+5. **Resource Optimization:** AWS COA will automatically evaluate the recommendations every week and apply the relevant recommendations during the designated maintenance window. This ensures that your resources are consistently optimized without manual intervention.
+
+6. **Optional User Approval (If Enabled):** If user approval is enabled, AWS COA will send approval requests before implementing changes. The approval flow uses the resource tags to determine the correct approver email. If no approver tag is found, the approval request is sent to the default email defined in the stack.
 
 # Limitations
 
